@@ -1,0 +1,180 @@
+:root {
+  --bg: #f4f6f8;
+  --card: #fff;
+  --tx: #17202a;
+  --mut: #667085;
+  --bd: #d5dbe3;
+  --ac: #1d4ed8;
+  --acx: #fff;
+  color-scheme: light;
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161c;
+    --card: #1a2029;
+    --tx: #e6e9ee;
+    --mut: #9aa4b2;
+    --bd: #323b48;
+    --ac: #7aa2ff;
+    --acx: #0b1220;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161c;
+  --card: #1a2029;
+  --tx: #e6e9ee;
+  --mut: #9aa4b2;
+  --bd: #323b48;
+  --ac: #7aa2ff;
+  --acx: #0b1220;
+  color-scheme: dark;
+}
+html {
+  scroll-padding-top: env(safe-area-inset-top, 0px);
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--tx);
+  font:
+    15px/1.7 "Noto Sans Khmer",
+    "Khmer OS",
+    system-ui,
+    sans-serif;
+}
+.w {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 12px;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+h1 {
+  font-size: 18px;
+  margin: 0;
+}
+h3 {
+  margin: 18px 0 8px;
+  font-size: 15px;
+}
+.card {
+  background: var(--card);
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  margin-bottom: 12px;
+}
+button,
+select,
+input,
+textarea {
+  font: inherit;
+  color: var(--tx);
+  background: var(--card);
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 4px 10px;
+}
+input[type="checkbox"] {
+  padding: 0;
+}
+button {
+  cursor: pointer;
+}
+button.p,
+.tabs button.on {
+  background: var(--ac);
+  color: var(--acx);
+  border-color: var(--ac);
+}
+.tabs button {
+  white-space: nowrap;
+}
+.row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.tw {
+  overflow-x: auto;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+th,
+td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--bd);
+  vertical-align: top;
+}
+th {
+  color: var(--mut);
+  font-weight: 600;
+}
+.chip {
+  border: 2px solid;
+  border-radius: 14px;
+  padding: 2px 10px;
+}
+.chip.on {
+  color: #fff !important;
+}
+#txt {
+  font-size: 20px;
+  line-height: 2.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 10px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  min-height: 140px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+#txt mark {
+  color: inherit;
+  border-radius: 3px;
+  padding: 2px 0;
+}
+#txt sup {
+  font: 600 10px system-ui;
+  margin-left: 2px;
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+}
+.mut {
+  color: var(--mut);
+}
+.err {
+  color: #d92d20;
+}
+textarea {
+  width: 100%;
+  min-height: 150px;
+  font-family: ui-monospace, "Noto Sans Khmer", monospace;
+  font-size: 12px;
+}

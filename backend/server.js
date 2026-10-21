@@ -1,0 +1,535 @@
+require("dotenv").config();
+
+const fs = require("node:fs"),
+  path = require("node:path"),
+  express = require("express"),
+  helmet = require("helmet"),
+  cookieParser = require("cookie-parser"),
+  rateLimit = require("express-rate-limit"),
+  bcrypt = require("bcryptjs"),
+  jwt = require("jsonwebtoken"),
+  mysql = require("mysql2/promise");
+const SECRET = process.env.JWT_SECRET;
+if (!SECRET) {
+  console.error("JWT_SECRET is required");
+  process.exit(1);
+}
+if (!process.env.DATABASE_URL) {
+  console.error("DATABASE_URL is required");
+  process.exit(1);
+}
+if (process.env.RENDER && !process.env.ADMIN_PASSWORD) {
+  console.error("ADMIN_PASSWORD is required");
+  process.exit(1);
+}
+let databaseUrl;
+try {
+  databaseUrl = new URL(process.env.DATABASE_URL);
+} catch (e) {
+  console.error("DATABASE_URL must be a valid MySQL connection URI");
+  process.exit(1);
+}
+if (databaseUrl.protocol !== "mysql:") {
+  console.error("DATABASE_URL must use the mysql:// scheme");
+  process.exit(1);
+}
+const pool = mysql.createPool({
+  host: databaseUrl.hostname,
+  port: Number(databaseUrl.port || 3306),
+  user: decodeURIComponent(databaseUrl.username),
+  password: decodeURIComponent(databaseUrl.password),
+  database: decodeURIComponent(databaseUrl.pathname.slice(1)),
+  charset: "utf8mb4",
+  ssl: {
+    ca: process.env.MYSQL_CA
+      ? process.env.MYSQL_CA.replace(/\\n/g, "\n")
+      : fs.readFileSync(path.join(__dirname, "aiven-ca.pem"), "utf8"),
+    rejectUnauthorized: true,
+  },
+  waitForConnections: true,
+  connectionLimit: 10,
+});
+const query = async (executor, sql, params = []) => {
+  const [result] = await executor.execute(sql, params);
+  return Array.isArray(result)
+    ? { rows: result, rowCount: result.length }
+    : { rows: [], rowCount: result.affectedRows, insertId: result.insertId };
+};
+pool.query = (sql, params) => query(pool, sql, params);
+pool.connect = async () => {
+  const connection = await pool.getConnection();
+  return {
+    query: (sql, params) => query(connection, sql, params),
+    begin: () => connection.beginTransaction(),
+    commit: () => connection.commit(),
+    rollback: () => connection.rollback(),
+    release: () => connection.release(),
+  };
+};
+const app = express();
+app.set("trust proxy", 1);
+app.use(helmet(), cookieParser(), express.json({ limit: "2mb" }));
+const h = (f) => (q, s) =>
+  f(q, s).catch((e) => {
+    console.error(e);
+    s.status(500).json({ error: "Server error" });
+  });
+const auth = async (q, s, n) => {
+  try {
+    const t = jwt.verify(q.cookies.sid || "", SECRET),
+      r = (
+        await pool.query(
+          "select username,user_role as role from users where username=?",
+          [t.u],
+        )
+      ).rows[0];
+    if (!r) throw 0;
+    q.u = { u: r.username, role: r.role };
+    n();
+  } catch (e) {
+    s.status(401).json({ error: "Please sign in again." });
+  }
+};
+const admin = (q, s, n) =>
+  q.u.role === "admin" ? n() : s.status(403).json({ error: "Admins only." });
+const err = (s, c, m) => s.status(c).json({ error: m });
+app.use(
+  "/api",
+  rateLimit({
+    windowMs: 9e5,
+    limit: 600,
+    standardHeaders: true,
+    legacyHeaders: false,
+  }),
+  (q, s, n) =>
+    q.method === "GET" || q.get("x-requested-with") === "khner"
+      ? n()
+      : err(s, 403, "Blocked request."),
+);
+
+app.get("/health", (q, s) => s.send("ok"));
+app.set("trust proxy", 1);
+const hits = new Map();
+app.post(
+  "/api/login",
+  h(async (q, s) => {
+    const { u, p } = q.body || {},
+      now = Date.now(),
+      a = (hits.get(q.ip) || []).filter((t) => now - t < 9e5);
+    if (a.length >= 10)
+      return err(s, 429, "Too many failed attempts. Try again in 15 minutes.");
+    const r = (await pool.query("select * from users where username=?", [u]))
+      .rows[0];
+    if (!r || !(await bcrypt.compare(p || "", r.pass))) {
+      a.push(now);
+      hits.set(q.ip, a);
+      return err(s, 401, "Wrong username or password.");
+    }
+    s.cookie("sid", jwt.sign({ u: r.username }, SECRET, { expiresIn: "12h" }), {
+      httpOnly: true,
+      secure: !!process.env.RENDER,
+      sameSite: "strict",
+      maxAge: 432e5,
+      path: "/",
+    }).json({
+      user: { u: r.username, role: r.role },
+      weak: p === "admin123" || p.length < 8,
+    });
+  }),
+);
+app.post("/api/logout", (q, s) =>
+  s.clearCookie("sid", { path: "/" }).json({ ok: 1 }),
+);
+app.use("/api", auth);
+app.get("/api/me", (q, s) => s.json({ user: q.u }));
+app.post(
+  "/api/password",
+  h(async (q, s) => {
+    const { old, nw } = q.body || {};
+    const r = (
+      await pool.query("select pass from users where username=?", [q.u.u])
+    ).rows[0];
+    if (!r || !(await bcrypt.compare(old || "", r.pass)))
+      return err(s, 400, "Current password is wrong.");
+    if (!nw || nw.length < 8) return err(s, 400, "Use at least 8 characters.");
+    await pool.query("update users set pass=? where username=?", [
+      await bcrypt.hash(nw, 10),
+      q.u.u,
+    ]);
+    s.json({ ok: 1 });
+  }),
+);
+app.patch(
+  "/api/anns/:id",
+  h(async (q, s) => {
+    try {
+      await pool.query(
+        "update anns a join docs d on d.id=a.doc_id set a.label=? where a.id=? and (? or d.assignee=?)",
+        [q.body.label, +q.params.id, q.u.role === "admin", q.u.u],
+      );
+      s.json({ ok: 1 });
+    } catch (e) {
+      if (e.code === "ER_NO_REFERENCED_ROW_2")
+        return err(s, 400, "Unknown label.");
+      throw e;
+    }
+  }),
+);
+
+// users (admin)
+app.get(
+  "/api/users",
+  admin,
+  h(async (q, s) =>
+    s.json(
+      (
+        await pool.query(
+          "select username u,user_role as role from users order by username",
+        )
+      ).rows,
+    ),
+  ),
+);
+app.post(
+  "/api/users",
+  admin,
+  h(async (q, s) => {
+    const { u, p, role } = q.body || {};
+    if (
+      !/^[\w.-]{3,32}$/.test(u || "") ||
+      !p ||
+      p.length < 8 ||
+      !["admin", "annotator"].includes(role)
+    )
+      return err(
+        s,
+        400,
+        "Username: 3-32 letters, digits, . _ - and password: at least 8 characters.",
+      );
+    try {
+      await pool.query(
+        "insert into users(username,pass,user_role) values(?,?,?)",
+        [u, await bcrypt.hash(p, 10), role],
+      );
+      s.json({ ok: 1 });
+    } catch (e) {
+      if (e.code === "ER_DUP_ENTRY")
+        return err(s, 409, "That username is taken.");
+      throw e;
+    }
+  }),
+);
+app.delete(
+  "/api/users/:u",
+  admin,
+  h(async (q, s) => {
+    if (q.params.u === q.u.u) return err(s, 400, "You cannot delete yourself.");
+    await pool.query("delete from users where username=?", [q.params.u]);
+    s.json({ ok: 1 });
+  }),
+);
+
+// labels (all roles)
+app.get(
+  "/api/labels",
+  h(async (q, s) =>
+    s.json(
+      (await pool.query("select name n,color c from labels order by name"))
+        .rows,
+    ),
+  ),
+);
+app.post(
+  "/api/labels",
+  h(async (q, s) => {
+    const n = String(q.body.n || "")
+      .trim()
+      .toUpperCase();
+    if (!n || n.length > 30 || !/^#[0-9a-f]{6}$/i.test(q.body.c || "#888888"))
+      return err(s, 400, "Enter a label name (max 30) and a valid color.");
+    const r = await pool.query(
+      "insert ignore into labels(name,color) values(?,?)",
+      [n, q.body.c || "#888"],
+    );
+    r.rowCount ? s.json({ ok: 1 }) : err(s, 409, "That label already exists.");
+  }),
+);
+app.delete(
+  "/api/labels/:n",
+  h(async (q, s) => {
+    try {
+      await pool.query("delete from labels where name=?", [q.params.n]);
+      s.json({ ok: 1 });
+    } catch (e) {
+      if (e.code === "ER_ROW_IS_REFERENCED_2")
+        return err(
+          s,
+          409,
+          "This label is used by annotations. Remove those first.",
+        );
+      throw e;
+    }
+  }),
+);
+
+// documents
+app.get(
+  "/api/docs",
+  h(async (q, s) => {
+    const a = q.u.role === "admin";
+    const docs = await pool.query(
+      `select id,title,body,assignee,done,review,note from docs
+       ${a ? "" : "where assignee=?"} order by id`,
+      a ? [] : [q.u.u],
+    );
+    const annotations = await pool.query(
+      `select x.id,x.doc_id,x.s,x.e,x.label l,x.author \`by\`
+       from anns x join docs d on d.id=x.doc_id
+       ${a ? "" : "where d.assignee=?"} order by x.s`,
+      a ? [] : [q.u.u],
+    );
+    const annsByDoc = new Map();
+    for (const annotation of annotations.rows) {
+      const key = String(annotation.doc_id);
+      if (!annsByDoc.has(key)) annsByDoc.set(key, []);
+      annsByDoc.get(key).push({
+        id: String(annotation.id),
+        s: annotation.s,
+        e: annotation.e,
+        l: annotation.l,
+        by: annotation.by,
+      });
+    }
+    s.json(
+      docs.rows.map((d) => ({
+        id: String(d.id),
+        title: d.title,
+        text: d.body,
+        as: d.assignee || "",
+        done: !!d.done,
+        review: d.review,
+        note: d.note,
+        anns: annsByDoc.get(String(d.id)) || [],
+      })),
+    );
+  }),
+);
+app.patch(
+  "/api/docs/:id",
+  h(async (q, s) => {
+    const { assignee, done, review, note } = q.body,
+      id = +q.params.id,
+      ad = q.u.role === "admin";
+    if (assignee !== undefined) {
+      if (!ad) return err(s, 403, "Admins only.");
+      await pool.query("update docs set assignee=? where id=?", [
+        assignee || null,
+        id,
+      ]);
+    }
+    if (done !== undefined)
+      await pool.query(
+        "update docs set done=?,review=case when ? then '' else review end where id=? and (? or assignee=?)",
+        [!!done, !!done, id, ad, q.u.u],
+      );
+    if (review !== undefined) {
+      if (!ad) return err(s, 403, "Admins only.");
+      await pool.query(
+        "update docs set review=?,note=?,done=case when ?='returned' then false else done end where id=?",
+        [review, note || "", review, id],
+      );
+    }
+    s.json({ ok: 1 });
+  }),
+);
+app.delete(
+  "/api/docs/:id",
+  admin,
+  h(async (q, s) => {
+    await pool.query("delete from docs where id=?", [+q.params.id]);
+    s.json({ ok: 1 });
+  }),
+);
+
+// annotations
+app.post(
+  "/api/docs/:id/anns",
+  h(async (q, s) => {
+    const id = +q.params.id,
+      { start: a, end: b, label } = q.body;
+    const d = (
+      await pool.query("select body,assignee from docs where id=?", [id])
+    ).rows[0];
+    if (!d || (q.u.role !== "admin" && d.assignee !== q.u.u))
+      return err(s, 404, "Document not found.");
+    if (
+      !Number.isInteger(a) ||
+      !Number.isInteger(b) ||
+      a < 0 ||
+      b <= a ||
+      b > d.body.length
+    )
+      return err(s, 400, "Invalid selection.");
+    if (
+      (
+        await pool.query("select 1 from anns where doc_id=? and ?<e and ?>s", [
+          id,
+          a,
+          b,
+        ])
+      ).rowCount
+    )
+      return err(
+        s,
+        409,
+        "That text overlaps an existing entity. Remove it first.",
+      );
+    try {
+      await pool.query(
+        "insert into anns(doc_id,s,e,label,author) values(?,?,?,?,?)",
+        [id, a, b, label, q.u.u],
+      );
+      s.json({ ok: 1 });
+    } catch (e) {
+      if (e.code === "ER_NO_REFERENCED_ROW_2")
+        return err(s, 400, "Unknown label.");
+      throw e;
+    }
+  }),
+);
+app.delete(
+  "/api/anns/:id",
+  h(async (q, s) => {
+    await pool.query(
+      "delete a from anns a join docs d on d.id=a.doc_id where a.id=? and (? or d.assignee=?)",
+      [+q.params.id, q.u.role === "admin", q.u.u],
+    );
+    s.json({ ok: 1 });
+  }),
+);
+
+// import
+app.post(
+  "/api/import",
+  h(async (q, s) => {
+    const { labels = [], docs = [] } = q.body,
+      u = q.u,
+      c = await pool.connect();
+    let n = 0;
+    try {
+      await c.begin();
+      for (const l of labels)
+        if (l.n)
+          await c.query("insert ignore into labels(name,color) values(?,?)", [
+            l.n,
+            l.c || "#888",
+          ]);
+      for (const d of docs) {
+        if (!d.text) continue;
+        let as = u.role === "admin" ? d.assignee : u.u;
+        if (
+          u.role === "admin" &&
+          as &&
+          !(
+            await c.query(
+              "select 1 from users where username=? and user_role='annotator'",
+              [as],
+            )
+          ).rowCount
+        )
+          as = null;
+        const id = (
+          await c.query(
+            "insert into docs(title,body,assignee,done,note) values(?,?,?,?,?)",
+            [
+              d.title || "Untitled",
+              d.text,
+              as || null,
+              u.role === "admin" && !!d.done,
+              "",
+            ],
+          )
+        ).insertId;
+        for (const a of d.annotations || []) {
+          if (
+            !a.label ||
+            !Number.isInteger(a.start) ||
+            !Number.isInteger(a.end) ||
+            a.start < 0 ||
+            a.end <= a.start ||
+            a.end > d.text.length
+          )
+            continue;
+          await c.query(
+            "insert ignore into labels(name,color) values(?,'#888')",
+            [a.label],
+          );
+          await c.query(
+            "insert into anns(doc_id,s,e,label,author) values(?,?,?,?,?)",
+            [id, a.start, a.end, a.label, a.by || null],
+          );
+        }
+        n++;
+      }
+      await c.commit();
+      s.json({ count: n });
+    } catch (e) {
+      await c.rollback();
+      throw e;
+    } finally {
+      c.release();
+    }
+  }),
+);
+
+(async () => {
+  await pool.query(`create table if not exists users (
+    username varchar(32) primary key,
+    pass varchar(255) not null,
+    user_role varchar(16) not null
+  ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
+  await pool.query(`create table if not exists labels (
+    name varchar(30) primary key,
+    color char(7) not null
+  ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
+  await pool.query(`create table if not exists docs (
+    id bigint unsigned not null auto_increment primary key,
+    title text not null,
+    body longtext not null,
+    assignee varchar(32) null,
+    done boolean not null default false,
+    review varchar(20) not null default '',
+    note text not null,
+    constraint docs_assignee_fk foreign key (assignee)
+      references users(username) on delete set null
+  ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
+  await pool.query(`create table if not exists anns (
+    id bigint unsigned not null auto_increment primary key,
+    doc_id bigint unsigned not null,
+    s int not null,
+    e int not null,
+    label varchar(30) not null,
+    author varchar(32) null,
+    constraint anns_doc_fk foreign key (doc_id)
+      references docs(id) on delete cascade,
+    constraint anns_label_fk foreign key (label)
+      references labels(name)
+  ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
+  if (!(await pool.query("select 1 from users")).rowCount)
+    await pool.query(
+      "insert into users(username,pass,user_role) values(?,?,?)",
+      [
+        process.env.ADMIN_USER || "admin",
+        await bcrypt.hash(process.env.ADMIN_PASSWORD || "admin123", 10),
+        "admin",
+      ],
+    );
+  if (!(await pool.query("select 1 from labels")).rowCount)
+    await pool.query(
+      "insert into labels(name,color) values('PER','#ef4444'),('LOC','#10b981'),('ORG','#3b82f6')",
+    );
+  app.listen(process.env.PORT || 3000, () => console.log("API ready"));
+})().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

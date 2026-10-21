@@ -353,18 +353,18 @@ function Tasks() {
                   >
                     {L("Open")}
                   </button>
-                  {A && (
-                    <>
-                      {" "}
-                      <button
-                        onClick={() =>
-                          run(() => api("DELETE", "/docs/" + d.id))
-                        }
-                      >
-                        {L("Delete")}
-                      </button>
-                    </>
-                  )}
+                  <button
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          "Delete this document and all its annotations? This cannot be undone.",
+                        )
+                      )
+                        run(() => api("DELETE", "/docs/" + d.id));
+                    }}
+                  >
+                    {L("Delete")}
+                  </button>
                   {A && d.done && d.review !== "approved" && <Review d={d} />}
                 </td>
               </tr>
@@ -815,7 +815,9 @@ function exportText(db, fmt) {
 function IO() {
   const { L, db, load, me, fmt, setFmt, setMsg } = useContext(C),
     [sp, setSp] = useState(true),
+    splitSentences = useRef(true),
     [ta, setTa] = useState(""),
+    [importing, setImporting] = useState(false),
     txt = exportText(db, fmt);
   const imp = async (raw, name) => {
     let items = [],
@@ -841,7 +843,7 @@ function IO() {
         setMsg("This JSON could not be read. Check the format.");
         return;
       }
-      items = sp
+      items = splitSentences.current
         ? raw
             .split(/(?<=។)\s*/)
             .filter((x) => x.trim())
@@ -859,12 +861,17 @@ function IO() {
       setMsg(e.message);
     }
   };
-  const files = (fs) =>
-    [...fs].forEach((f) => {
-      const r = new FileReader();
-      r.onload = () => imp(r.result, f.name);
-      r.readAsText(f);
-    });
+  const files = async (fs) => {
+    for (const f of [...fs]) {
+      const raw = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = () => reject(r.error || new Error("Unable to read file."));
+        r.readAsText(f);
+      });
+      await imp(raw, f.name);
+    }
+  };
   const dl = () => {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(
@@ -882,13 +889,28 @@ function IO() {
             type="file"
             accept=".json,.txt"
             multiple
-            onChange={(e) => files(e.target.files)}
+            disabled={importing}
+            onChange={(e) => {
+              const input = e.currentTarget;
+              setImporting(true);
+              files(input.files)
+                .catch((error) =>
+                  setMsg("Could not read file: " + error.message),
+                )
+                .finally(() => {
+                  input.value = "";
+                  setImporting(false);
+                });
+            }}
           />
           <label>
             <input
               type="checkbox"
               checked={sp}
-              onChange={(e) => setSp(e.target.checked)}
+              onChange={(e) => {
+                splitSentences.current = e.target.checked;
+                setSp(e.target.checked);
+              }}
             />{" "}
             {L("Split into sentences at ។")}
           </label>

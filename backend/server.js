@@ -344,9 +344,12 @@ app.patch(
 );
 app.delete(
   "/api/docs/:id",
-  admin,
   h(async (q, s) => {
-    await pool.query("delete from docs where id=?", [+q.params.id]);
+    const result = await pool.query(
+      "delete from docs where id=? and (? or assignee=?)",
+      [+q.params.id, q.u.role === "admin", q.u.u],
+    );
+    if (!result.rowCount) return err(s, 404, "Document not found.");
     s.json({ ok: 1 });
   }),
 );

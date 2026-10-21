@@ -24,13 +24,22 @@ The browser only talks to your Vercel domain; Vercel forwards `/api` to Render, 
 3. Set `JWT_SECRET` to a long random value and `ADMIN_PASSWORD` to a strong
    password. The bundled Aiven CA certificate is used for server certificate
    verification by default.
-4. Run `npm install` and `npm start` from `backend`, then run `npm install` and
-   `npm run dev` from `frontend`.
+4. Run `npm install` and `npm run dev` from `frontend`. Vite forwards API
+   requests to `https://khmer-ner.onrender.com`; the Render backend and Aiven
+   database must be running and configured.
+
+To run the backend locally instead, start it from `backend` with `npm install`
+and `npm start`. Vite's development proxy targets Render by default.
 
 The backend creates the required MySQL tables on startup and seeds the initial
 admin account and labels if the database is empty. Existing PostgreSQL data is
 not migrated automatically. Keep `backend/.env` private; do not commit database
 credentials.
+
+Admins can delete any document; annotators can permanently delete documents
+assigned to them. Deleting a document also deletes its annotations. After a
+file import finishes, the file picker is reset so the same file can be selected
+again.
 
 No backend: run `npm install` and `npm run demo` from `frontend` (data stays in
 your browser; demo login is admin / admin123).

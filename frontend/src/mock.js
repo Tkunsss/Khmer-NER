@@ -85,7 +85,7 @@ async function local(m, p, b) {
         JSON.stringify(A ? M.docs : M.docs.filter((d) => d.as === U.u)),
       );
     if (m === "DELETE") {
-      if (!A) E("Admins only.");
+      D();
       M.docs = M.docs.filter((d) => d.id !== id);
     } else if (m === "PATCH") {
       const d = D();

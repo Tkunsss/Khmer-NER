@@ -769,10 +769,11 @@ function Users() {
 }
 
 function exportText(db) {
+  const docs = db.docs;
   return JSON.stringify(
     {
       labels: db.labels,
-      docs: D.map((d) => ({
+      docs: docs.map((d) => ({
         title: d.title,
         text: d.text,
         assignee: d.as,

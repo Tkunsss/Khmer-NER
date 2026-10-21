@@ -790,8 +790,6 @@ function exportText(db) {
 }
 function IO() {
   const { L, db, load, me, setMsg } = useContext(C),
-    [sp, setSp] = useState(true),
-    splitSentences = useRef(true),
     [ta, setTa] = useState(""),
     [importing, setImporting] = useState(false),
     txt = exportText(db),
@@ -838,12 +836,7 @@ function IO() {
       items = undefined;
     }
     if (!items) {
-      items = splitSentences.current
-        ? raw
-            .split(/(?<=។)\s*/)
-            .filter((x) => x.trim())
-            .map((x, i) => ({ title: name + " #" + (i + 1), text: x.trim() }))
-        : [{ title: name, text: raw }];
+      items = [{ title: name, text: raw }];
     }
     try {
       const r = await api("POST", "/import", {
@@ -919,17 +912,6 @@ function IO() {
                 });
             }}
           />
-          <label>
-            <input
-              type="checkbox"
-              checked={sp}
-              onChange={(e) => {
-                splitSentences.current = e.target.checked;
-                setSp(e.target.checked);
-              }}
-            />{" "}
-            {L("Split into sentences at ។")}
-          </label>
         </div>
         <textarea
           placeholder={L("Write or paste text here")}

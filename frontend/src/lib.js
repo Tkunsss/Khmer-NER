@@ -56,7 +56,6 @@ const KM = {
   "Old password": "ពាក្យសម្ងាត់ចាស់",
   "New password": "ពាក្យសម្ងាត់ថ្មី",
   "Change password": "ប្តូរពាក្យសម្ងាត់",
-  "Split into sentences at ។": "បំបែកជាប្រយោគតាម ។",
   "Select text to tag it with the chosen label. Keys 1-9 pick a label.":
     "ជ្រើសអត្ថបទ ដើម្បីដាក់ស្លាក។ ចុចលេខ 1-9 ដើម្បីជ្រើសស្លាក។",
   "Your password is weak. Change it in Account.":

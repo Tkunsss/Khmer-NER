@@ -769,23 +769,23 @@ function Users() {
 }
 
 function exportText(db) {
-  const docs = db.docs;
+  const docs = db.docs
+    .map((d) => ({
+      title: d.title,
+      annotations: d.anns.map((n) => ({
+        text: d.text.slice(n.s, n.e),
+        label: n.l,
+        by: n.by,
+      })),
+    }))
+    .filter((d) => d.annotations.length > 0);
+  const usedLabels = new Set(
+    docs.flatMap((d) => d.annotations.map((a) => a.label)),
+  );
   return JSON.stringify(
     {
-      labels: db.labels,
-      docs: docs.map((d) => ({
-        title: d.title,
-        text: d.text,
-        assignee: d.as,
-        done: d.done,
-        annotations: d.anns.map((n) => ({
-          start: n.s,
-          end: n.e,
-          label: n.l,
-          text: d.text.slice(n.s, n.e),
-          by: n.by,
-        })),
-      })),
+      labels: db.labels.filter((label) => usedLabels.has(label.n)),
+      docs,
     },
     null,
     2,

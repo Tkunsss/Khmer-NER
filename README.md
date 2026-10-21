@@ -41,5 +41,9 @@ assigned to them. Deleting a document also deletes its annotations. After a
 file import finishes, the file picker is reset so the same file can be selected
 again.
 
+Import accepts text-based files and text typed or pasted into the import box.
+Sentence splitting is optional. Export downloads the available documents and
+annotations as a JSON file.
+
 No backend: run `npm install` and `npm run demo` from `frontend` (data stays in
 your browser; demo login is admin / admin123).

@@ -49,9 +49,10 @@ const KM = {
   Search: "ស្វែងរក",
   Import: "នាំចូល",
   Export: "នាំចេញ",
+  "Documents included": "ឯកសាររួមបញ្ចូល",
+  Annotations: "ការដាក់ស្លាក",
   Copy: "ចម្លង",
   Download: "ទាញយក",
-  Format: "ទ្រង់ទ្រាយ",
   "Old password": "ពាក្យសម្ងាត់ចាស់",
   "New password": "ពាក្យសម្ងាត់ថ្មី",
   "Change password": "ប្តូរពាក្យសម្ងាត់",
@@ -64,7 +65,8 @@ const KM = {
   "Open a document from the Documents tab to start annotating.":
     "សូមបើកឯកសារពីផ្ទាំងឯកសារ ដើម្បីចាប់ផ្តើមដាក់ស្លាក។",
   "No documents yet.": "មិនទាន់មានឯកសារ។",
-  "Paste JSON here": "បិទភ្ជាប់ JSON នៅទីនេះ",
+  "Write or paste text here": "សរសេរ ឬបិទភ្ជាប់អត្ថបទនៅទីនេះ",
+  "Export as JSON": "នាំចេញជា JSON",
 };
 const isMk = (c) => /[\u17B6-\u17D3\u17DD]/.test(c || "");
 function segs(t) {
@@ -86,13 +88,4 @@ function snap(t, st, en) {
   while (en < t.length && isMk(t[en])) en++;
   return [st, en];
 }
-function toks(t) {
-  const g = segs(t)
-    .filter((x) => /\S/.test(x.segment))
-    .map((x) => [x.index, x.index + x.segment.length]);
-  return g.length
-    ? g
-    : [...t.matchAll(/\S+/g)].map((m) => [m.index, m.index + m[0].length]);
-}
-
-export { KM, snap, toks };
+export { KM, snap };

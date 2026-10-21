@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
-import { KM, snap, toks, setSnap } from "./lib.js";
+import { KM, snap, setSnap } from "./lib.js";
 const C = createContext(),
   RL = { admin: "អ្នកគ្រប់គ្រង", annotator: "អ្នកដាក់ស្លាក" };
 const stt = (d, L) =>
@@ -31,7 +31,6 @@ export default function App() {
     [msg, setMsg] = useState(""),
     [weak, setWeak] = useState(false);
   const [qf, setQf] = useState(""),
-    [fmt, setFmt] = useState("json"),
     [snapOn, setSnapOn] = useState(true);
   const L = (s) => (lang === "km" && KM[s]) || s,
     rl = (r) => (lang === "km" ? RL[r] : r);
@@ -97,8 +96,6 @@ export default function App() {
     setAct,
     qf,
     setQf,
-    fmt,
-    setFmt,
     snapOn,
     setSnapOn,
     setWeak,
@@ -178,7 +175,15 @@ export default function App() {
           ))}
         </div>
         {msg && (
-          <p className={/^(Imported|Password changed)/.test(msg) ? "" : "err"}>
+          <p
+            className={
+              /^(Imported|Password changed|Export copied|Export downloaded)/.test(
+                msg,
+              )
+                ? ""
+                : "err"
+            }
+          >
             {msg}
           </p>
         )}
@@ -763,34 +768,7 @@ function Users() {
   );
 }
 
-function exportText(db, fmt) {
-  const D = db.docs;
-  if (fmt === "spacy")
-    return JSON.stringify(
-      D.map((d) => [
-        d.text,
-        {
-          entities: [...d.anns]
-            .sort((a, b) => a.s - b.s)
-            .map((n) => [n.s, n.e, n.l]),
-        },
-      ]),
-      null,
-      1,
-    );
-  if (fmt === "conll")
-    return D.map((d) =>
-      toks(d.text)
-        .map(([a, b]) => {
-          const n = d.anns.find((n) => b > n.s && a < n.e);
-          return (
-            d.text.slice(a, b) +
-            "\t" +
-            (n ? (a <= n.s ? "B-" : "I-") + n.l : "O")
-          );
-        })
-        .join("\n"),
-    ).join("\n\n");
+function exportText(db) {
   return JSON.stringify(
     {
       labels: db.labels,
@@ -813,36 +791,55 @@ function exportText(db, fmt) {
   );
 }
 function IO() {
-  const { L, db, load, me, fmt, setFmt, setMsg } = useContext(C),
+  const { L, db, load, me, setMsg } = useContext(C),
     [sp, setSp] = useState(true),
     splitSentences = useRef(true),
     [ta, setTa] = useState(""),
     [importing, setImporting] = useState(false),
-    txt = exportText(db, fmt);
+    txt = exportText(db),
+    annotationCount = db.docs.reduce((total, d) => total + d.anns.length, 0);
   const imp = async (raw, name) => {
-    let items = [],
+    if (!raw.trim()) {
+      setMsg("There is no text to import.");
+      return;
+    }
+    let items,
       labs = [];
     try {
-      let j = JSON.parse(raw);
-      if (j && j.labels) labs = j.labels;
-      if (j && j.docs) j = j.docs;
-      if (!Array.isArray(j)) j = [j];
-      items = j.map((x, i) =>
-        typeof x === "string"
-          ? { title: name + " #" + (i + 1), text: x }
-          : {
-              title: x.title || name + " #" + (i + 1),
-              text: x.text || "",
-              assignee: x.assignee,
-              done: x.done,
-              annotations: x.annotations || [],
-            },
-      );
-    } catch (e) {
-      if (/\.json$/i.test(name) || /^\s*[\[{]/.test(raw)) {
-        setMsg("This JSON could not be read. Check the format.");
-        return;
+      const parsed = JSON.parse(raw);
+      const values = Array.isArray(parsed)
+        ? parsed
+        : parsed && Array.isArray(parsed.docs)
+          ? parsed.docs
+          : parsed && typeof parsed.text === "string"
+            ? [parsed]
+            : null;
+      if (
+        values &&
+        values.every(
+          (item) =>
+            typeof item === "string" ||
+            (item && typeof item === "object" && typeof item.text === "string"),
+        )
+      ) {
+        if (!Array.isArray(parsed) && Array.isArray(parsed.labels))
+          labs = parsed.labels;
+        items = values.map((item, i) =>
+          typeof item === "string"
+            ? { title: name + " #" + (i + 1), text: item }
+            : {
+                title: item.title || name + " #" + (i + 1),
+                text: item.text,
+                assignee: item.assignee,
+                done: item.done,
+                annotations: item.annotations || [],
+              },
+        );
       }
+    } catch (e) {
+      items = undefined;
+    }
+    if (!items) {
       items = splitSentences.current
         ? raw
             .split(/(?<=។)\s*/)
@@ -853,10 +850,11 @@ function IO() {
     try {
       const r = await api("POST", "/import", {
         labels: labs,
-        docs: items.filter((x) => x.text),
+        docs: items.filter((x) => x.text.trim()),
       });
       await load(me.role);
       setMsg("Imported " + r.count + " document(s).");
+      if (name === "Pasted") setTa("");
     } catch (e) {
       setMsg(e.message);
     }
@@ -873,21 +871,41 @@ function IO() {
     }
   };
   const dl = () => {
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(
-      new Blob([txt], { type: "text/plain;charset=utf-8" }),
-    );
-    a.download = "khmer-ner." + (fmt === "conll" ? "conll" : "json");
-    a.click();
+    try {
+      const a = document.createElement("a"),
+        url = URL.createObjectURL(
+          new Blob([txt], {
+            type: "application/json;charset=utf-8",
+          }),
+        );
+      a.href = url;
+      a.download = "khmer-ner-annotations.json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setMsg("Export downloaded.");
+    } catch (e) {
+      setMsg("Could not download export: " + e.message);
+    }
+  };
+  const copy = async () => {
+    try {
+      if (!navigator.clipboard?.writeText)
+        throw new Error("Clipboard access is unavailable. Use Download.");
+      await navigator.clipboard.writeText(txt);
+      setMsg("Export copied to clipboard.");
+    } catch (e) {
+      setMsg("Could not copy export: " + e.message);
+    }
   };
   return (
     <>
       <div className="card">
-        <h3 style={{ marginTop: 0 }}>{L("Import")} JSON / TXT</h3>
+        <h3 style={{ marginTop: 0 }}>{L("Import")}</h3>
         <div className="row">
           <input
             type="file"
-            accept=".json,.txt"
             multiple
             disabled={importing}
             onChange={(e) => {
@@ -916,7 +934,7 @@ function IO() {
           </label>
         </div>
         <textarea
-          placeholder={L("Paste JSON here")}
+          placeholder={L("Write or paste text here")}
           value={ta}
           onChange={(e) => setTa(e.target.value)}
         />
@@ -928,22 +946,14 @@ function IO() {
       </div>
       <div className="card">
         <h3 style={{ marginTop: 0 }}>{L("Export")}</h3>
-        <div className="row">
-          <label>
-            {L("Format")}{" "}
-            <select value={fmt} onChange={(e) => setFmt(e.target.value)}>
-              <option value="json">JSON</option>
-              <option value="conll">CoNLL (BIO)</option>
-              <option value="spacy">spaCy</option>
-            </select>
-          </label>
-        </div>
+        <p className="mut">
+          {L("Documents included")}: {db.docs.length} · {L("Annotations")}:{" "}
+          {annotationCount}
+        </p>
+        <p className="mut">{L("Export as JSON")}</p>
         <textarea readOnly value={txt} />
         <div className="row" style={{ marginTop: 6 }}>
-          <button
-            className="p"
-            onClick={() => navigator.clipboard?.writeText(txt)}
-          >
+          <button className="p" onClick={copy}>
             {L("Copy")}
           </button>
           <button onClick={dl}>{L("Download")}</button>

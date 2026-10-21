@@ -768,25 +768,78 @@ function Users() {
   );
 }
 
+function sentenceRanges(text) {
+  const boundaries = new Set();
+  try {
+    const segments = [
+      ...new Intl.Segmenter("km", { granularity: "sentence" }).segment(text),
+    ];
+    for (const segment of segments.slice(0, -1))
+      boundaries.add(segment.index + segment.segment.length);
+  } catch (e) {
+    const boundary = /(?<=[៕.!?])\s+|(?<=។)\s+|\r?\n+/gu;
+    for (const match of text.matchAll(boundary))
+      boundaries.add(match.index + match[0].length);
+  }
+  for (const match of text.matchAll(/[។៕]/gu))
+    boundaries.add(match.index + match[0].length);
+  const ends = [...boundaries]
+    .filter((end) => end > 0 && end < text.length)
+    .sort((a, b) => a - b);
+  ends.push(text.length);
+  let start = 0;
+  const ranges = ends.map((end) => {
+    const range = { start, end };
+    start = end;
+    return range;
+  });
+  return ranges
+    .map(({ start, end }) => {
+      while (start < end && /\s/u.test(text[start])) start++;
+      while (end > start && /\s/u.test(text[end - 1])) end--;
+      return { start, end };
+    })
+    .filter(({ start, end }) => end > start);
+}
+
 function exportText(db) {
-  return JSON.stringify(
-    db.docs
-      .filter((d) => d.anns.length > 0)
-      .map((d, i) => ({
-        id: `sent_${String(i + 1).padStart(3, "0")}`,
-        text: d.text,
-        entities: d.anns
-          .slice()
-          .sort((a, b) => a.s - b.s)
-          .map((n) => ({
-            start: n.s,
-            end: n.e,
-            label: n.l,
-          })),
-      })),
-    null,
-    2,
-  );
+  const records = [];
+  for (const d of db.docs) {
+    const ranges = sentenceRanges(d.text);
+    const annotations = d.anns.slice().sort((a, b) => a.s - b.s);
+    for (const annotation of annotations) {
+      const index = ranges.findIndex(
+        ({ start, end }) => annotation.s >= start && annotation.s < end,
+      );
+      while (
+        index >= 0 &&
+        annotation.e > ranges[index].end &&
+        index + 1 < ranges.length
+      ) {
+        ranges[index].end = ranges[index + 1].end;
+        ranges.splice(index + 1, 1);
+      }
+    }
+    for (const range of ranges) {
+      const entities = annotations
+        .filter(
+          (annotation) =>
+            annotation.s >= range.start && annotation.e <= range.end,
+        )
+        .map((annotation) => ({
+          start: annotation.s - range.start,
+          end: annotation.e - range.start,
+          label: annotation.l,
+        }));
+      if (!entities.length) continue;
+      records.push({
+        id: `sent_${String(records.length + 1).padStart(3, "0")}`,
+        text: d.text.slice(range.start, range.end),
+        entities,
+      });
+    }
+  }
+  return JSON.stringify(records, null, 2);
 }
 function IO() {
   const { L, db, load, me, setMsg } = useContext(C),

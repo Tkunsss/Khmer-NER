@@ -28,6 +28,7 @@ M = M || {
     },
   ],
 };
+M.annotatorLabels ||= {};
 async function local(m, p, b) {
   const sv = () => {
       try {
@@ -56,7 +57,12 @@ async function local(m, p, b) {
       M.docs.find((d) => d.id === id && (A || assignedTo(d, U.u))) ||
       E("Document not found.");
   let out = { ok: 1 };
-  if (r === "users") {
+  if (r === "users" && p.endsWith("/labels")) {
+    if (!A) E("Admins only.");
+    if (m === "GET") return M.annotatorLabels[id] || [];
+    if (!Array.isArray(b.labels) || !M.users.some((z) => z.u === id && z.role === "annotator") || b.labels.some((label) => !M.labels.some((l) => l.n === label))) E("Choose an annotator and valid labels.");
+    M.annotatorLabels[id] = [...new Set(b.labels)];
+  } else if (r === "users") {
     if (!A) E("Admins only.");
     if (m === "GET") return M.users.map(({ u, role }) => ({ u, role }));
     if (m === "POST") {
@@ -71,8 +77,9 @@ async function local(m, p, b) {
       });
     }
   } else if (r === "labels") {
-    if (m === "GET") return M.labels;
+    if (m === "GET") return A ? M.labels : M.labels.filter((l) => (M.annotatorLabels[U.u] || []).includes(l.n));
     if (m === "POST") {
+      if (!A) E("Admins only.");
       if (M.labels.some((l) => l.n === b.n)) E("That label already exists.");
       M.labels.push({ n: b.n, c: b.c });
     } else {
@@ -119,6 +126,7 @@ async function local(m, p, b) {
       }
     } else {
       const d = D();
+      if (!A && !(M.annotatorLabels[U.u] || []).includes(b.label)) E("That label is not assigned to you.");
       if (b.start < 0 || b.end <= b.start || b.end > d.text.length)
         E("Invalid selection.");
       if (d.anns.some((a) => b.start < a.e && b.end > a.s))
@@ -137,14 +145,17 @@ async function local(m, p, b) {
         if (m === "DELETE") d.anns = d.anns.filter((a) => a.id !== id);
         else
           d.anns.forEach((a) => {
-            if (a.id === id) a.l = b.label;
+            if (a.id === id) {
+              if (!A && !(M.annotatorLabels[U.u] || []).includes(b.label)) E("That label is not assigned to you.");
+              a.l = b.label;
+            }
           });
       }
     });
   } else if (r === "import") {
     let n = 0;
     (b.labels || []).forEach((l) => {
-      if (l.n && !M.labels.some((z) => z.n === l.n))
+      if (A && l.n && !M.labels.some((z) => z.n === l.n))
         M.labels.push({ n: l.n, c: l.c || "#888" });
     });
     b.docs.forEach((d) => {
@@ -158,6 +169,7 @@ async function local(m, p, b) {
       (d.annotations || []).forEach((a) => {
         if (
           a.label &&
+          (A || (M.annotatorLabels[U.u] || []).includes(a.label)) &&
           a.start >= 0 &&
           a.end > a.start &&
           a.end <= d.text.length

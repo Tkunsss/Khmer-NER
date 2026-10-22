@@ -163,6 +163,12 @@ app.patch(
   "/api/anns/:id",
   h(async (q, s) => {
     try {
+      const label = q.body.label;
+      if (q.u.role === "annotator" && !(await pool.query(
+        "select 1 from annotator_labels where username=? and label=?",
+        [q.u.u, label],
+      )).rowCount)
+        return err(s, 400, "That label is not assigned to you.");
       await pool.query(
         "update anns a join docs d on d.id=a.doc_id set a.label=? where a.id=? and (? or d.assignee=? or exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?))",
         [q.body.label, +q.params.id, q.u.role === "admin", q.u.u, q.u.u],
@@ -233,12 +239,9 @@ app.delete(
 app.get(
   "/api/labels",
   h(async (q, s) => {
-    const assigned = q.u.role === "annotator" && (await pool.query(
-      "select 1 from annotator_labels where username=? limit 1", [q.u.u],
-    )).rowCount;
     s.json((await pool.query(
-      `select l.name n,l.color c from labels l ${assigned ? "join annotator_labels al on al.label=l.name and al.username=?" : ""} order by l.name`,
-      assigned ? [q.u.u] : [],
+      `select l.name n,l.color c from labels l ${q.u.role === "annotator" ? "join annotator_labels al on al.label=l.name and al.username=?" : ""} order by l.name`,
+      q.u.role === "annotator" ? [q.u.u] : [],
     )).rows);
   }),
 );
@@ -417,8 +420,7 @@ app.post(
     if (!d || (q.u.role !== "admin" && d.assignee !== q.u.u && !(await pool.query("select 1 from doc_assignments where doc_id=? and username=?", [id,q.u.u])).rowCount))
       return err(s, 404, "Document not found.");
     if (q.u.role === "annotator") {
-      const restricted = (await pool.query("select 1 from annotator_labels where username=? limit 1", [q.u.u])).rowCount;
-      if (restricted && !(await pool.query("select 1 from annotator_labels where username=? and label=?", [q.u.u,label])).rowCount)
+      if (!(await pool.query("select 1 from annotator_labels where username=? and label=?", [q.u.u,label])).rowCount)
         return err(s, 400, "That label is not assigned to you.");
     }
     if (
@@ -478,7 +480,7 @@ app.post(
     try {
       await c.begin();
       for (const l of labels)
-        if (l.n)
+        if (l.n && u.role === "admin")
           await c.query("insert ignore into labels(name,color) values(?,?)", [
             l.n,
             l.c || "#888",
@@ -518,6 +520,11 @@ app.post(
             a.end <= a.start ||
             a.end > d.text.length
           )
+            continue;
+          if (u.role === "annotator" && !(await c.query(
+            "select 1 from annotator_labels where username=? and label=?",
+            [u.u, a.label],
+          )).rowCount)
             continue;
           await c.query(
             "insert ignore into labels(name,color) values(?,'#888')",

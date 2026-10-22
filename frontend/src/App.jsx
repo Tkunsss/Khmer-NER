@@ -632,10 +632,14 @@ function Annotate() {
 function Data() {
   const { L, me, db } = useContext(C),
     A = me.role === "admin",
+    [annotator, setAnnotator] = useState("all"),
     rows = [],
     cnt = {};
   db.docs.forEach((d) =>
     d.anns.forEach((n) => {
+      const owner = n.by || d.as || "";
+      if ((A && annotator !== "all" && owner !== annotator) || (!A && owner !== me.u))
+        return;
       rows.push([d, n]);
       cnt[n.l] = (cnt[n.l] || 0) + 1;
     }),
@@ -644,6 +648,17 @@ function Data() {
   return (
     <>
       <div className="card">
+        {A && (
+          <div className="row" style={{ marginBottom: 8 }}>
+            <label>{L("Annotator")}</label>
+            <select value={annotator} onChange={(e) => setAnnotator(e.target.value)}>
+              <option value="all">{L("All annotators")}</option>
+              {db.users.filter((u) => u.role === "annotator").map((u) => (
+                <option key={u.u} value={u.u}>{u.u}</option>
+              ))}
+            </select>
+          </div>
+        )}
         <b>{rows.length}</b> {L("entities")}
         <div className="row" style={{ marginTop: 6 }}>
           {Object.keys(cnt).map((k) => (

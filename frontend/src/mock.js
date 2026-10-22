@@ -91,6 +91,13 @@ async function local(m, p, b) {
       const d = D();
       if (b.assignee !== undefined) {
         if (!A) E("Admins only.");
+        if (b.assignee !== null && typeof b.assignee !== "string")
+          E("Choose an annotator or unassign the document.");
+        if (
+          b.assignee &&
+          !M.users.some((z) => z.u === b.assignee && z.role === "annotator")
+        )
+          E("Choose an annotator or unassign the document.");
         d.as = b.assignee;
       }
       if (b.done !== undefined) {

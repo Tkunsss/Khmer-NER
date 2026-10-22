@@ -274,6 +274,7 @@ function Tasks() {
                   <th>{L("Assigned")}</th>
                   <th>{L("Done")}</th>
                   <th>{L("Entities")}</th>
+                  <th>{L("Completion")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -287,9 +288,55 @@ function Tasks() {
                         {d.filter((x) => x.done).length}/{d.length}
                       </td>
                       <td>{d.reduce((a, x) => a + x.anns.length, 0)}</td>
+                      <td>
+                        {d.length
+                          ? Math.round(
+                              (d.filter((x) => x.done).length / d.length) * 100,
+                            )
+                          : 0}
+                        %
+                      </td>
                     </tr>
                   );
                 })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {!A && (
+        <>
+          <h3>{L("My progress")}</h3>
+          <div className="card tw">
+            <table>
+              <thead>
+                <tr>
+                  <th>{L("Assigned")}</th>
+                  <th>{L("Done")}</th>
+                  <th>{L("Remaining")}</th>
+                  <th>{L("Entities")}</th>
+                  <th>{L("Completion")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>{db.docs.length}</td>
+                  <td>{db.docs.filter((d) => d.done).length}</td>
+                  <td>{db.docs.filter((d) => !d.done).length}</td>
+                  <td>
+                    {db.docs.reduce((total, d) => total + d.anns.length, 0)}
+                  </td>
+                  <td>
+                    {db.docs.length
+                      ? Math.round(
+                          (db.docs.filter((d) => d.done).length /
+                            db.docs.length) *
+                            100,
+                        )
+                      : 0}
+                    %
+                  </td>
+                </tr>
               </tbody>
             </table>
           </div>
@@ -844,9 +891,12 @@ function exportText(db) {
 function IO() {
   const { L, db, load, me, setMsg } = useContext(C),
     [ta, setTa] = useState(""),
+    [exportAnnotator, setExportAnnotator] = useState("all"),
     [importing, setImporting] = useState(false),
-    txt = exportText(db),
-    annotationCount = db.docs.reduce((total, d) => total + d.anns.length, 0);
+    annotators = db.users.filter((u) => u.role === "annotator"),
+    exportDocs = db.docs.filter((d) => me.role !== "admin" || exportAnnotator === "all" || d.as === exportAnnotator),
+    txt = exportText({ ...db, docs: exportDocs }),
+    annotationCount = exportDocs.reduce((total, d) => total + d.anns.length, 0);
   const imp = async (raw, name) => {
     if (!raw.trim()) {
       setMsg("There is no text to import.");
@@ -979,8 +1029,17 @@ function IO() {
       </div>
       <div className="card">
         <h3 style={{ marginTop: 0 }}>{L("Export")}</h3>
+        {me.role === "admin" && (
+          <div className="row" style={{ marginBottom: 8 }}>
+            <label>{L("Annotator")}</label>
+            <select value={exportAnnotator} onChange={(e) => setExportAnnotator(e.target.value)}>
+              <option value="all">{L("All annotators")}</option>
+              {annotators.map((u) => <option key={u.u} value={u.u}>{u.u}</option>)}
+            </select>
+          </div>
+        )}
         <p className="mut">
-          {L("Documents included")}: {db.docs.length} · {L("Annotations")}:{" "}
+          {L("Documents included")}: {exportDocs.length} · {L("Annotations")}:{" "}
           {annotationCount}
         </p>
         <p className="mut">{L("Export as JSON")}</p>

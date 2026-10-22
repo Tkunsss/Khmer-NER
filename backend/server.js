@@ -322,6 +322,20 @@ app.patch(
       ad = q.u.role === "admin";
     if (assignee !== undefined) {
       if (!ad) return err(s, 403, "Admins only.");
+      if (assignee !== null && typeof assignee !== "string")
+        return err(s, 400, "Choose an annotator or unassign the document.");
+      if (assignee) {
+        const annotator = await pool.query(
+          "select 1 from users where username=? and user_role='annotator'",
+          [assignee],
+        );
+        if (!annotator.rowCount)
+          return err(s, 400, "Choose an annotator or unassign the document.");
+      }
+      if (
+        !(await pool.query("select 1 from docs where id=?", [id])).rowCount
+      )
+        return err(s, 404, "Document not found.");
       await pool.query("update docs set assignee=? where id=?", [
         assignee || null,
         id,

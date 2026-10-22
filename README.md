@@ -41,6 +41,11 @@ assigned to them. Deleting a document also deletes its annotations. After a
 file import finishes, the file picker is reset so the same file can be selected
 again.
 
+Admins can assign documents only to annotator accounts and view each
+annotator's assigned, completed, and annotated-document totals. Annotators can
+view their own assigned, completed, remaining, and entity totals in My progress.
+Only admins can create or manage user accounts.
+
 Import accepts text-based files and text typed or pasted into the import box.
 Each plain-text import is kept as one document. Export downloads the available
 documents and annotations as a JSON file.

@@ -26,6 +26,7 @@ const KM = {
   entities: "អង្គភាព",
   Title: "ចំណងជើង",
   "Assigned to": "ចាត់ឱ្យ",
+  "Save assignment": "រក្សាទុកការចាត់តាំង",
   Unassigned: "មិនទាន់ចាត់ចែង",
   Status: "ស្ថានភាព",
   "In progress": "កំពុងធ្វើ",

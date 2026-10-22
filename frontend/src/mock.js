@@ -51,8 +51,9 @@ async function local(m, p, b) {
   const A = U.role === "admin",
     [, r, i] = p.split("/"),
     id = i && decodeURIComponent(i),
+    assignedTo = (d, username) => (d.assignees || (d.as ? [d.as] : [])).includes(username),
     D = () =>
-      M.docs.find((d) => d.id === id && (A || d.as === U.u)) ||
+      M.docs.find((d) => d.id === id && (A || assignedTo(d, U.u))) ||
       E("Document not found.");
   let out = { ok: 1 };
   if (r === "users") {
@@ -82,7 +83,7 @@ async function local(m, p, b) {
   } else if (r === "docs") {
     if (m === "GET")
       return JSON.parse(
-        JSON.stringify(A ? M.docs : M.docs.filter((d) => d.as === U.u)),
+        JSON.stringify(A ? M.docs : M.docs.filter((d) => assignedTo(d, U.u))),
       );
     if (m === "DELETE") {
       D();
@@ -99,6 +100,12 @@ async function local(m, p, b) {
         )
           E("Choose an annotator or unassign the document.");
         d.as = b.assignee;
+        d.assignees = b.assignee ? [b.assignee] : [];
+      }
+      if (b.assignees !== undefined) {
+        if (!A || !Array.isArray(b.assignees) || b.assignees.some((u) => typeof u !== "string" || !M.users.some((z) => z.u === u && z.role === "annotator"))) E("Choose valid annotators.");
+        d.assignees = [...new Set(b.assignees)];
+        d.as = d.assignees.join(", ");
       }
       if (b.done !== undefined) {
         d.done = b.done;
@@ -126,7 +133,7 @@ async function local(m, p, b) {
     }
   } else if (r === "anns") {
     M.docs.forEach((d) => {
-      if (A || d.as === U.u) {
+      if (A || assignedTo(d, U.u)) {
         if (m === "DELETE") d.anns = d.anns.filter((a) => a.id !== id);
         else
           d.anns.forEach((a) => {
@@ -171,6 +178,7 @@ async function local(m, p, b) {
         title: d.title || "Untitled",
         text: d.text,
         as,
+        assignees: as ? [as] : [],
         done: A && !!d.done,
         review: "",
         note: "",

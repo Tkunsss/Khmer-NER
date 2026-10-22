@@ -256,6 +256,29 @@ function Review({ d }) {
   );
 }
 
+function Assignment({ d, annotators, L, run }) {
+  const current = d.assignees || (d.as ? [d.as] : []);
+  const [selected, setSelected] = useState(current);
+  useEffect(() => setSelected(current), [d.assignees, d.as]);
+  const changed = selected.length !== current.length || selected.some((u) => !current.includes(u));
+  return (
+    <div className="assignment">
+      <details>
+        <summary>{current.length ? `${L("Assigned to")}: ${current.join(", ")}` : L("Unassigned")}</summary>
+        <div className="assignment-options">
+          {annotators.map((u) => (
+            <label key={u.u}>
+              <input type="checkbox" checked={selected.includes(u.u)} onChange={(e) => setSelected((old) => e.target.checked ? [...old, u.u] : old.filter((x) => x !== u.u))} />
+              {u.u}
+            </label>
+          ))}
+          <button className="p" disabled={!changed} onClick={() => run(() => api("PATCH", "/docs/" + d.id, { assignees: selected }))}>{L("Save assignment")}</button>
+        </div>
+      </details>
+    </div>
+  );
+}
+
 function Tasks() {
   const { L, me, db, run, qf, setQf, setCur, setTab } = useContext(C),
     A = me.role === "admin",
@@ -366,26 +389,7 @@ function Tasks() {
                 <td>{d.title}</td>
                 <td>
                   {A && (
-                    <>
-                      <select
-                        multiple
-                        value={d.assignees || (d.as ? [d.as] : [])}
-                        onChange={(e) =>
-                          run(() =>
-                            api("PATCH", "/docs/" + d.id, {
-                              assignees: [...e.target.selectedOptions].map((o) => o.value),
-                            }),
-                          )
-                        }
-                      >
-                        {an.map((u) => (
-                          <option key={u.u} value={u.u}>
-                            {u.u}
-                          </option>
-                        ))}
-                      </select>
-                      <br />
-                    </>
+                    <Assignment d={d} annotators={an} L={L} run={run} />
                   )}
                   {stt(d, L)}
                   {d.review === "returned" && d.note && (

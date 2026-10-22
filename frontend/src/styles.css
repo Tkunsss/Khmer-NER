@@ -97,6 +97,27 @@ textarea {
 input[type="checkbox"] {
   padding: 0;
 }
+.assignment summary {
+  cursor: pointer;
+  color: var(--ac);
+}
+.assignment-options {
+  display: grid;
+  gap: 4px;
+  min-width: 150px;
+  padding: 8px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--card);
+}
+.assignment-options label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.assignment-options button {
+  margin-top: 4px;
+}
 button {
   cursor: pointer;
 }

@@ -937,7 +937,9 @@ function exportText(db, annotator = "all") {
 }
 function IO() {
   const { L, db, load, me, setMsg } = useContext(C),
+    fileInput = useRef(null),
     [ta, setTa] = useState(""),
+    [selectedFiles, setSelectedFiles] = useState([]),
     [exportAnnotator, setExportAnnotator] = useState("all"),
     [importing, setImporting] = useState(false),
     annotators = db.users.filter((u) => u.role === "annotator"),
@@ -1011,6 +1013,19 @@ function IO() {
       await imp(raw, f.name);
     }
   };
+  const doImport = async () => {
+    setImporting(true);
+    try {
+      if (selectedFiles.length) await files(selectedFiles);
+      if (ta.trim()) await imp(ta, "Pasted");
+    } catch (error) {
+      setMsg("Could not read file: " + error.message);
+    } finally {
+      setSelectedFiles([]);
+      if (fileInput.current) fileInput.current.value = "";
+      setImporting(false);
+    }
+  };
   const dl = () => {
     try {
       const a = document.createElement("a"),
@@ -1046,30 +1061,23 @@ function IO() {
         <h3 style={{ marginTop: 0 }}>{L("Import")}</h3>
         <div className="row">
           <input
+            ref={fileInput}
             type="file"
             multiple
             disabled={importing}
-            onChange={(e) => {
-              const input = e.currentTarget;
-              setImporting(true);
-              files(input.files)
-                .catch((error) =>
-                  setMsg("Could not read file: " + error.message),
-                )
-                .finally(() => {
-                  input.value = "";
-                  setImporting(false);
-                });
-            }}
+            onChange={(e) => setSelectedFiles([...e.currentTarget.files])}
           />
         </div>
+        {selectedFiles.length > 0 && (
+          <p className="mut">{selectedFiles.map((file) => file.name).join(", ")}</p>
+        )}
         <textarea
           placeholder={L("Write or paste text here")}
           value={ta}
           onChange={(e) => setTa(e.target.value)}
         />
         <div className="row" style={{ marginTop: 6 }}>
-          <button className="p" onClick={() => imp(ta, "Pasted")}>
+          <button className="p" disabled={importing || (!ta.trim() && !selectedFiles.length)} onClick={doImport}>
             {L("Import")}
           </button>
         </div>

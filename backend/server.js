@@ -164,8 +164,8 @@ app.patch(
   h(async (q, s) => {
     try {
       await pool.query(
-        "update anns a join docs d on d.id=a.doc_id set a.label=? where a.id=? and (? or d.assignee=?)",
-        [q.body.label, +q.params.id, q.u.role === "admin", q.u.u],
+        "update anns a join docs d on d.id=a.doc_id set a.label=? where a.id=? and (? or d.assignee=? or exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?))",
+        [q.body.label, +q.params.id, q.u.role === "admin", q.u.u, q.u.u],
       );
       s.json({ ok: 1 });
     } catch (e) {
@@ -232,15 +232,34 @@ app.delete(
 // labels (all roles)
 app.get(
   "/api/labels",
-  h(async (q, s) =>
-    s.json(
-      (await pool.query("select name n,color c from labels order by name"))
-        .rows,
-    ),
-  ),
+  h(async (q, s) => {
+    const assigned = q.u.role === "annotator" && (await pool.query(
+      "select 1 from annotator_labels where username=? limit 1", [q.u.u],
+    )).rowCount;
+    s.json((await pool.query(
+      `select l.name n,l.color c from labels l ${assigned ? "join annotator_labels al on al.label=l.name and al.username=?" : ""} order by l.name`,
+      assigned ? [q.u.u] : [],
+    )).rows);
+  }),
 );
+app.put("/api/users/:u/labels", admin, h(async (q, s) => {
+  const { u } = q.params, labels = q.body.labels;
+  if (!Array.isArray(labels) || !(await pool.query("select 1 from users where username=? and user_role='annotator'", [u])).rowCount)
+    return err(s, 400, "Choose an annotator and labels.");
+  const c = await pool.connect();
+  try {
+    await c.begin();
+    await c.query("delete from annotator_labels where username=?", [u]);
+    for (const label of [...new Set(labels)]) await c.query("insert into annotator_labels(username,label) values(?,?)", [u,label]);
+    await c.commit(); s.json({ok:1});
+  } catch (e) { await c.rollback(); throw e; } finally { c.release(); }
+}));
+app.get("/api/users/:u/labels", admin, h(async (q, s) => {
+  s.json((await pool.query("select label from annotator_labels where username=? order by label", [q.params.u])).rows.map((r) => r.label));
+}));
 app.post(
   "/api/labels",
+  admin,
   h(async (q, s) => {
     const n = String(q.body.n || "")
       .trim()
@@ -256,6 +275,7 @@ app.post(
 );
 app.delete(
   "/api/labels/:n",
+  admin,
   h(async (q, s) => {
     try {
       await pool.query("delete from labels where name=?", [q.params.n]);
@@ -279,14 +299,17 @@ app.get(
     const a = q.u.role === "admin";
     const docs = await pool.query(
       `select id,title,body,assignee,done,review,note from docs
-       ${a ? "" : "where assignee=?"} order by id`,
-      a ? [] : [q.u.u],
+       ${a ? "" : "where exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=?"} order by id`,
+      a ? [] : [q.u.u,q.u.u],
     );
+    const assignments = await pool.query("select doc_id,username from doc_assignments order by username");
+    const assignedByDoc = new Map();
+    for (const row of assignments.rows) { const k=String(row.doc_id); if(!assignedByDoc.has(k)) assignedByDoc.set(k,[]); assignedByDoc.get(k).push(row.username); }
     const annotations = await pool.query(
       `select x.id,x.doc_id,x.s,x.e,x.label l,x.author \`by\`
        from anns x join docs d on d.id=x.doc_id
-       ${a ? "" : "where d.assignee=?"} order by x.s`,
-      a ? [] : [q.u.u],
+       ${a ? "" : "where (exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?) or d.assignee=?)"} order by x.s`,
+      a ? [] : [q.u.u,q.u.u],
     );
     const annsByDoc = new Map();
     for (const annotation of annotations.rows) {
@@ -305,7 +328,8 @@ app.get(
         id: String(d.id),
         title: d.title,
         text: d.body,
-        as: d.assignee || "",
+        assignees: [...new Set([...(assignedByDoc.get(String(d.id)) || []), ...(d.assignee ? [d.assignee] : [])])],
+        as: [...new Set([...(assignedByDoc.get(String(d.id)) || []), ...(d.assignee ? [d.assignee] : [])])].join(", "),
         done: !!d.done,
         review: d.review,
         note: d.note,
@@ -341,10 +365,23 @@ app.patch(
         id,
       ]);
     }
+    if (q.body.assignees !== undefined) {
+      if (!ad || !Array.isArray(q.body.assignees) || q.body.assignees.some((u) => typeof u !== "string"))
+        return err(s, 400, "Choose one or more annotators.");
+      const chosen = [...new Set(q.body.assignees)];
+      for (const username of chosen) if (!(await pool.query("select 1 from users where username=? and user_role='annotator'", [username])).rowCount)
+        return err(s, 400, "Choose valid annotators.");
+      const c = await pool.connect();
+      try {
+        await c.begin(); await c.query("delete from doc_assignments where doc_id=?", [id]);
+        for (const username of chosen) await c.query("insert into doc_assignments(doc_id,username) values(?,?)", [id,username]);
+        await c.query("update docs set assignee=null where id=?", [id]); await c.commit();
+      } catch (e) { await c.rollback(); throw e; } finally { c.release(); }
+    }
     if (done !== undefined)
       await pool.query(
-        "update docs set done=?,review=case when ? then '' else review end where id=? and (? or assignee=?)",
-        [!!done, !!done, id, ad, q.u.u],
+        "update docs set done=?,review=case when ? then '' else review end where id=? and (? or assignee=? or exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?))",
+        [!!done, !!done, id, ad, q.u.u, q.u.u],
       );
     if (review !== undefined) {
       if (!ad) return err(s, 403, "Admins only.");
@@ -360,8 +397,8 @@ app.delete(
   "/api/docs/:id",
   h(async (q, s) => {
     const result = await pool.query(
-      "delete from docs where id=? and (? or assignee=?)",
-      [+q.params.id, q.u.role === "admin", q.u.u],
+      "delete from docs where id=? and (? or assignee=? or exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?))",
+      [+q.params.id, q.u.role === "admin", q.u.u, q.u.u],
     );
     if (!result.rowCount) return err(s, 404, "Document not found.");
     s.json({ ok: 1 });
@@ -377,8 +414,13 @@ app.post(
     const d = (
       await pool.query("select body,assignee from docs where id=?", [id])
     ).rows[0];
-    if (!d || (q.u.role !== "admin" && d.assignee !== q.u.u))
+    if (!d || (q.u.role !== "admin" && d.assignee !== q.u.u && !(await pool.query("select 1 from doc_assignments where doc_id=? and username=?", [id,q.u.u])).rowCount))
       return err(s, 404, "Document not found.");
+    if (q.u.role === "annotator") {
+      const restricted = (await pool.query("select 1 from annotator_labels where username=? limit 1", [q.u.u])).rowCount;
+      if (restricted && !(await pool.query("select 1 from annotator_labels where username=? and label=?", [q.u.u,label])).rowCount)
+        return err(s, 400, "That label is not assigned to you.");
+    }
     if (
       !Number.isInteger(a) ||
       !Number.isInteger(b) ||
@@ -418,8 +460,8 @@ app.delete(
   "/api/anns/:id",
   h(async (q, s) => {
     await pool.query(
-      "delete a from anns a join docs d on d.id=a.doc_id where a.id=? and (? or d.assignee=?)",
-      [+q.params.id, q.u.role === "admin", q.u.u],
+      "delete a from anns a join docs d on d.id=a.doc_id where a.id=? and (? or d.assignee=? or exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?))",
+      [+q.params.id, q.u.role === "admin", q.u.u, q.u.u],
     );
     s.json({ ok: 1 });
   }),
@@ -509,6 +551,12 @@ app.post(
     name varchar(30) primary key,
     color char(7) not null
   ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
+  await pool.query(`create table if not exists annotator_labels (
+    username varchar(32) not null, label varchar(30) not null,
+    primary key(username,label),
+    constraint annotator_labels_user_fk foreign key(username) references users(username) on delete cascade,
+    constraint annotator_labels_label_fk foreign key(label) references labels(name) on delete cascade
+  ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
   await pool.query(`create table if not exists docs (
     id bigint unsigned not null auto_increment primary key,
     title text not null,
@@ -520,6 +568,13 @@ app.post(
     constraint docs_assignee_fk foreign key (assignee)
       references users(username) on delete set null
   ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
+  await pool.query(`create table if not exists doc_assignments (
+    doc_id bigint unsigned not null, username varchar(32) not null,
+    primary key(doc_id,username),
+    constraint doc_assignments_doc_fk foreign key(doc_id) references docs(id) on delete cascade,
+    constraint doc_assignments_user_fk foreign key(username) references users(username) on delete cascade
+  ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
+  await pool.query("insert ignore into doc_assignments(doc_id,username) select id,assignee from docs where assignee is not null");
   await pool.query(`create table if not exists anns (
     id bigint unsigned not null auto_increment primary key,
     doc_id bigint unsigned not null,

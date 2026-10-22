@@ -119,7 +119,7 @@ export default function App() {
       ["tasks", A ? "Documents" : "My documents"],
       ["annotate", "Annotate"],
       ["data", "Data"],
-      ["labels", "Labels"],
+      ...(A ? [["labels", "Labels"]] : []),
       ...(A ? [["users", "Users"]] : []),
       ["io", "Import / Export"],
       ["acct", "Account"],
@@ -279,7 +279,7 @@ function Tasks() {
               </thead>
               <tbody>
                 {an.map((u) => {
-                  const d = db.docs.filter((x) => x.as === u.u);
+                  const d = db.docs.filter((x) => x.assignees?.includes(u.u) || x.as === u.u);
                   return (
                     <tr key={u.u}>
                       <td>{u.u}</td>
@@ -368,16 +368,16 @@ function Tasks() {
                   {A && (
                     <>
                       <select
-                        value={d.as}
+                        multiple
+                        value={d.assignees || (d.as ? [d.as] : [])}
                         onChange={(e) =>
                           run(() =>
                             api("PATCH", "/docs/" + d.id, {
-                              assignee: e.target.value,
+                              assignees: [...e.target.selectedOptions].map((o) => o.value),
                             }),
                           )
                         }
                       >
-                        <option value="">{L("Unassigned")}</option>
                         {an.map((u) => (
                           <option key={u.u} value={u.u}>
                             {u.u}
@@ -708,7 +708,14 @@ function Data() {
 function Labels() {
   const { L, db, run } = useContext(C),
     [n, setN] = useState(""),
-    [c, setC] = useState("#f59e0b");
+    [c, setC] = useState("#f59e0b"),
+    [target, setTarget] = useState(""),
+    [assigned, setAssigned] = useState([]);
+  useEffect(() => {
+    if (!target) { setAssigned([]); return; }
+    api("GET", "/users/" + encodeURIComponent(target) + "/labels")
+      .then(setAssigned).catch(() => setAssigned([]));
+  }, [target]);
   return (
     <div className="card">
       <div className="row">
@@ -752,6 +759,25 @@ function Labels() {
           </span>
         ))}
       </div>
+      {db.users.some((u) => u.role === "annotator") && (
+        <div style={{ marginTop: 12 }}>
+          <div className="row">
+            <label>{L("Assign labels to annotator")}</label>
+            <select value={target} onChange={(e) => setTarget(e.target.value)}>
+              <option value="">{L("Choose annotator")}</option>
+              {db.users.filter((u) => u.role === "annotator").map((u) => <option key={u.u} value={u.u}>{u.u}</option>)}
+            </select>
+          </div>
+          {target && <>
+            <div className="row" style={{ marginTop: 6 }}>
+              {db.labels.map((l) => <label key={l.n} className="chip">
+                <input type="checkbox" checked={assigned.includes(l.n)} onChange={(e) => setAssigned((old) => e.target.checked ? [...old, l.n] : old.filter((x) => x !== l.n))} /> {l.n}
+              </label>)}
+            </div>
+            <button className="p" style={{ marginTop: 6 }} onClick={() => run(() => api("PUT", "/users/" + encodeURIComponent(target) + "/labels", { labels: assigned }))}>{L("Save label assignment")}</button>
+          </>}
+        </div>
+      )}
     </div>
   );
 }
@@ -864,11 +890,13 @@ function sentenceRanges(text) {
     .filter(({ start, end }) => end > start);
 }
 
-function exportText(db) {
+function exportText(db, annotator = "all") {
   const records = [];
   for (const d of db.docs) {
     const ranges = sentenceRanges(d.text);
-    const annotations = d.anns.slice().sort((a, b) => a.s - b.s);
+    const annotations = d.anns
+      .filter((a) => annotator === "all" || (a.by || "") === annotator || (!a.by && (d.assignees || []).includes(annotator)))
+      .slice().sort((a, b) => a.s - b.s);
     for (const annotation of annotations) {
       const index = ranges.findIndex(
         ({ start, end }) => annotation.s >= start && annotation.s < end,
@@ -909,8 +937,8 @@ function IO() {
     [exportAnnotator, setExportAnnotator] = useState("all"),
     [importing, setImporting] = useState(false),
     annotators = db.users.filter((u) => u.role === "annotator"),
-    exportDocs = db.docs.filter((d) => me.role !== "admin" || exportAnnotator === "all" || d.as === exportAnnotator),
-    txt = exportText({ ...db, docs: exportDocs }),
+    exportDocs = db.docs.filter((d) => me.role !== "admin" || exportAnnotator === "all" || d.assignees?.includes(exportAnnotator) || d.as === exportAnnotator),
+    txt = exportText({ ...db, docs: exportDocs }, me.role === "admin" ? exportAnnotator : "all"),
     annotationCount = exportDocs.reduce((total, d) => total + d.anns.length, 0);
   const imp = async (raw, name) => {
     if (!raw.trim()) {

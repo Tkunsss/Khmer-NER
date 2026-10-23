@@ -594,6 +594,9 @@ app.post(
     constraint anns_label_fk foreign key (label)
       references labels(name)
   ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
+  await pool.query("update users set user_role='admin' where username=?", [
+    process.env.ADMIN_USER || "admin",
+  ]);
   if (!(await pool.query("select 1 from users")).rowCount)
     await pool.query(
       "insert into users(username,pass,user_role) values(?,?,?)",

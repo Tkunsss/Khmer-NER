@@ -52,6 +52,12 @@ async function local(m, p, b) {
     [, r, i] = p.split("/"),
     id = i && decodeURIComponent(i),
     assignedTo = (d, username) => (d.assignees || (d.as ? [d.as] : [])).includes(username),
+    rowLimited = (d, username) =>
+      (d.rowAssignments || []).some(
+        (assignment) => assignment.username === username,
+      ),
+    fullAccess = (d, username) =>
+      assignedTo(d, username) && !rowLimited(d, username),
     rowForOffset = (text, offset) => {
       let row = 1;
       for (let i = 0; i < offset; i++) {
@@ -62,6 +68,23 @@ async function local(m, p, b) {
       }
       return row;
     },
+    maskUnassignedRows = (text, assignments) => {
+      let row = 1;
+      return text
+        .split(/(\r\n|\r|\n)/)
+        .map((part) => {
+          if (/^(?:\r\n|\r|\n)$/.test(part)) {
+            row++;
+            return part;
+          }
+          return assignments.some(
+            (assignment) => row >= assignment.start && row <= assignment.end,
+          )
+            ? part
+            : "•".repeat(part.length);
+        })
+        .join("");
+    },
     rowAssignedTo = (d, username, row) =>
       (d.rowAssignments || []).some(
         (assignment) =>
@@ -71,8 +94,8 @@ async function local(m, p, b) {
       ),
     canAccessAnnotation = (d, a) =>
       A ||
-      assignedTo(d, U.u) ||
-      rowAssignedTo(d, U.u, rowForOffset(d.text, a.s)),
+      (fullAccess(d, U.u) ||
+        rowAssignedTo(d, U.u, rowForOffset(d.text, a.s))),
     D = () =>
       M.docs.find(
         (d) =>
@@ -126,6 +149,14 @@ async function local(m, p, b) {
                 )
                 .map((d) => ({
                   ...d,
+                  text: rowLimited(d, U.u)
+                    ? maskUnassignedRows(
+                        d.text,
+                        (d.rowAssignments || []).filter(
+                          (assignment) => assignment.username === U.u,
+                        ),
+                      )
+                    : d.text,
                   rowAssignments: (d.rowAssignments || []).filter(
                     (a) => a.username === U.u,
                   ),
@@ -216,7 +247,7 @@ async function local(m, p, b) {
         );
       }
       if (b.done !== undefined) {
-        if (!A && !assignedTo(d, U.u)) E("Only a document assignee can change document status.");
+        if (!A && !fullAccess(d, U.u)) E("Only a document assignee can change document status.");
         d.done = b.done;
         if (b.done) d.review = "";
       }
@@ -234,7 +265,7 @@ async function local(m, p, b) {
         endRow = rowForOffset(d.text, b.end - 1);
       if (
         !A &&
-        !assignedTo(d, U.u) &&
+        !fullAccess(d, U.u) &&
         (startRow !== endRow || !rowAssignedTo(d, U.u, startRow))
       )
         E("This row is not assigned to you.");

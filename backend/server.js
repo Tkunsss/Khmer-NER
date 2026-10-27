@@ -108,6 +108,23 @@ const rowForOffset = (text, offset) => {
   }
   return row;
 };
+const maskUnassignedRows = (text, assignments) => {
+  let row = 1;
+  return text
+    .split(/(\r\n|\r|\n)/)
+    .map((part) => {
+      if (/^(?:\r\n|\r|\n)$/.test(part)) {
+        row++;
+        return part;
+      }
+      return assignments.some(
+        (assignment) => row >= assignment.start && row <= assignment.end,
+      )
+        ? part
+        : "•".repeat(part.length);
+    })
+    .join("");
+};
 app.use(
   "/api",
   rateLimit({
@@ -185,14 +202,19 @@ app.patch(
     ).rows[0];
     if (!annotation) return err(s, 404, "Annotation not found.");
     if (q.u.role !== "admin") {
+      const assignedRows = await pool.query(
+        "select 1 from row_assignments where doc_id=? and username=? limit 1",
+        [annotation.doc_id, q.u.u],
+      );
       const fullAccess =
-        annotation.assignee === q.u.u ||
-        (
-          await pool.query(
-            "select 1 from doc_assignments where doc_id=? and username=?",
-            [annotation.doc_id, q.u.u],
-          )
-        ).rowCount;
+        !assignedRows.rowCount &&
+        (annotation.assignee === q.u.u ||
+          (
+            await pool.query(
+              "select 1 from doc_assignments where doc_id=? and username=?",
+              [annotation.doc_id, q.u.u],
+            )
+          ).rowCount);
       const row = rowForOffset(annotation.body, annotation.s);
       if (
         !fullAccess &&
@@ -363,10 +385,13 @@ app.get(
     if (!a) {
       for (const [docId, anns] of annsByDoc) {
         const doc = docs.rows.find((row) => String(row.id) === docId);
-        const assignedRows = rowAssignmentsByDoc.get(docId) || [];
+        const assignedRows = (rowAssignmentsByDoc.get(docId) || []).filter(
+          (assignment) => assignment.username === q.u.u,
+        );
         const fullAccess =
-          doc.assignee === q.u.u ||
-          (assignedByDoc.get(docId) || []).includes(q.u.u);
+          !assignedRows.length &&
+          (doc.assignee === q.u.u ||
+            (assignedByDoc.get(docId) || []).includes(q.u.u));
         if (!fullAccess)
           annsByDoc.set(
             docId,
@@ -386,7 +411,15 @@ app.get(
       docs.rows.map((d) => ({
         id: String(d.id),
         title: d.title,
-        text: d.body,
+        text:
+          !a && rowAssignmentsByDoc.has(String(d.id))
+            ? maskUnassignedRows(
+                d.body,
+                (rowAssignmentsByDoc.get(String(d.id)) || []).filter(
+                  (assignment) => assignment.username === q.u.u,
+                ),
+              )
+            : d.body,
         assignees: [...new Set([...(assignedByDoc.get(String(d.id)) || []), ...(d.assignee ? [d.assignee] : [])])],
         as: [...new Set([...(assignedByDoc.get(String(d.id)) || []), ...(d.assignee ? [d.assignee] : [])])].join(", "),
         rowAssignments: rowAssignmentsByDoc.get(String(d.id)) || [],
@@ -523,16 +556,29 @@ app.patch(
         [id, username, start, end],
       );
     }
-    if (done !== undefined)
-      if (ad || (await pool.query(
-        "select 1 from docs d where d.id=? and (d.assignee=? or exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?))",
-        [id, q.u.u, q.u.u],
-      )).rowCount)
+    if (done !== undefined) {
+      const rowLimited =
+        !ad &&
+        (
+          await pool.query(
+            "select 1 from row_assignments where doc_id=? and username=? limit 1",
+            [id, q.u.u],
+          )
+        ).rowCount;
+      if (
+        ad ||
+        (!rowLimited &&
+          (await pool.query(
+            "select 1 from docs d where d.id=? and (d.assignee=? or exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?))",
+            [id, q.u.u, q.u.u],
+          )).rowCount)
+      )
         await pool.query(
           "update docs set done=?,review=case when ? then '' else review end where id=?",
           [!!done, !!done, id],
         );
       else return err(s, 403, "Only a document assignee can change document status.");
+    }
     if (review !== undefined) {
       if (!ad) return err(s, 403, "Admins only.");
       await pool.query(
@@ -574,13 +620,20 @@ app.post(
       b > d.body.length
     )
       return err(s, 400, "Invalid selection.");
-    if (q.u.role !== "admin" && d.assignee !== q.u.u) {
-      const fullAccess = (
-        await pool.query(
-          "select 1 from doc_assignments where doc_id=? and username=?",
-          [id, q.u.u],
-        )
-      ).rowCount;
+    if (q.u.role !== "admin") {
+      const assignedRows = await pool.query(
+        "select 1 from row_assignments where doc_id=? and username=? limit 1",
+        [id, q.u.u],
+      );
+      const fullAccess =
+        !assignedRows.rowCount &&
+        (d.assignee === q.u.u ||
+          (
+            await pool.query(
+              "select 1 from doc_assignments where doc_id=? and username=?",
+              [id, q.u.u],
+            )
+          ).rowCount);
       const startRow = rowForOffset(d.body, a),
         endRow = rowForOffset(d.body, b - 1);
       if (
@@ -630,13 +683,20 @@ app.delete(
       )
     ).rows[0];
     if (!annotation) return s.json({ ok: 1 });
-    if (q.u.role !== "admin" && annotation.assignee !== q.u.u) {
-      const fullAccess = (
-        await pool.query(
-          "select 1 from doc_assignments where doc_id=? and username=?",
-          [annotation.doc_id, q.u.u],
-        )
-      ).rowCount;
+    if (q.u.role !== "admin") {
+      const assignedRows = await pool.query(
+        "select 1 from row_assignments where doc_id=? and username=? limit 1",
+        [annotation.doc_id, q.u.u],
+      );
+      const fullAccess =
+        !assignedRows.rowCount &&
+        (annotation.assignee === q.u.u ||
+          (
+            await pool.query(
+              "select 1 from doc_assignments where doc_id=? and username=?",
+              [annotation.doc_id, q.u.u],
+            )
+          ).rowCount);
       const row = rowForOffset(annotation.body, annotation.s);
       if (
         !fullAccess &&

@@ -603,8 +603,19 @@ function Annotate() {
     col = (n) => db.labels.find((l) => l.n === n)?.c || "#888";
   const lines = documentLines(d.text),
     rowAssignments = d.rowAssignments || [],
-    fullDocumentAssigned = (d.assignees || (d.as ? [d.as] : [])).includes(me.u),
-    rowAssigned = (row) => me.role === "admin" || fullDocumentAssigned || rowAssignments.some((assignment) => assignment.username === me.u && row >= assignment.start && row <= assignment.end);
+    myRowAssignments = rowAssignments.filter(
+      (assignment) => assignment.username === me.u,
+    ),
+    fullDocumentAssigned =
+      !myRowAssignments.length &&
+      (d.assignees || (d.as ? [d.as] : [])).includes(me.u),
+    rowAssigned = (row) =>
+      me.role === "admin" ||
+      (myRowAssignments.length
+        ? myRowAssignments.some(
+            (assignment) => row >= assignment.start && row <= assignment.end,
+          )
+        : fullDocumentAssigned);
   const sel = () =>
     setTimeout(() => {
       const s = getSelection();
@@ -706,9 +717,6 @@ function Annotate() {
         <p className="mut" style={{ margin: "4px 0" }}>
           {L("Select text to tag it with the chosen label. Keys 1-9 pick a label.")}
         </p>
-        {!rowAssigned(currentLineIndex + 1) && (
-          <p className="mut">{L("This row is not assigned to you.")}</p>
-        )}
         <div className="row" style={{ justifyContent: "space-between" }}>
           <button
             disabled={currentLineIndex === 0}
@@ -769,7 +777,9 @@ function Annotate() {
           </button>
         </div>
         <div id="txt" ref={box} onMouseUp={sel} onTouchEnd={sel} className={rowAssigned(currentLineIndex + 1) ? "" : "unassigned-row"}>
-          {parts}
+          {rowAssigned(currentLineIndex + 1)
+            ? parts
+            : L("This row is not assigned to you.")}
         </div>
         {pending && (
           <div

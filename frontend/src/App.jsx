@@ -636,6 +636,7 @@ function Data() {
   const { L, me, db } = useContext(C),
     A = me.role === "admin",
     [annotator, setAnnotator] = useState("all"),
+    [rowIndex, setRowIndex] = useState(0),
     rows = [],
     cnt = {};
   db.docs.forEach((d) =>
@@ -647,6 +648,7 @@ function Data() {
       cnt[n.l] = (cnt[n.l] || 0) + 1;
     }),
   );
+  const currentIndex = Math.min(rowIndex, Math.max(0, rows.length - 1));
   const col = (n) => db.labels.find((l) => l.n === n)?.c || "#888";
   return (
     <>
@@ -654,7 +656,7 @@ function Data() {
         {A && (
           <div className="row" style={{ marginBottom: 8 }}>
             <label>{L("Annotator")}</label>
-            <select value={annotator} onChange={(e) => setAnnotator(e.target.value)}>
+            <select value={annotator} onChange={(e) => { setAnnotator(e.target.value); setRowIndex(0); }}>
               <option value="all">{L("All annotators")}</option>
               {db.users.filter((u) => u.role === "annotator").map((u) => (
                 <option key={u.u} value={u.u}>{u.u}</option>
@@ -672,6 +674,11 @@ function Data() {
         </div>
       </div>
       <div className="card tw">
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <button disabled={!rows.length || currentIndex === 0} onClick={() => setRowIndex(currentIndex - 1)}>{L("Previous")}</button>
+          <span className="mut">{rows.length ? `${currentIndex + 1} / ${rows.length}` : "0 / 0"}</span>
+          <button disabled={!rows.length || currentIndex >= rows.length - 1} onClick={() => setRowIndex(currentIndex + 1)}>{L("Next")}</button>
+        </div>
         <table>
           <thead>
             <tr>
@@ -683,7 +690,7 @@ function Data() {
             </tr>
           </thead>
           <tbody>
-            {rows.map(([d, n]) => (
+            {rows.slice(currentIndex, currentIndex + 1).map(([d, n]) => (
               <tr key={n.id}>
                 <td>{d.text.slice(n.s, n.e)}</td>
                 <td>{n.l}</td>

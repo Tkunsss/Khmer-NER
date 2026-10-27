@@ -339,6 +339,14 @@ function rowForOffset(text, offset) {
   return row;
 }
 
+function assignedRows(d, username) {
+  if ((d.assignees || (d.as ? [d.as] : [])).includes(username))
+    return [{ start: 1, end: documentLines(d.text).length }];
+  return (d.rowAssignments || [])
+    .filter((assignment) => assignment.username === username)
+    .map(({ start, end }) => ({ start, end }));
+}
+
 function Tasks() {
   const { L, me, db, run, qf, setQf, setCur, setTab } = useContext(C),
     A = me.role === "admin",
@@ -372,7 +380,18 @@ function Tasks() {
                   return (
                     <tr key={u.u}>
                       <td>{u.u}</td>
-                      <td>{d.length}</td>
+                      <td>
+                        {d.map((doc) => (
+                          <div className="assigned-range" key={doc.id}>
+                            <b>{doc.title}</b>
+                            {assignedRows(doc, u.u).map((range) => (
+                              <div key={`${range.start}-${range.end}`}>
+                                {L("Rows")} {range.start}–{range.end}
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </td>
                       <td>
                         {d.filter((x) => x.done).length}/{d.length}
                       </td>
@@ -409,7 +428,18 @@ function Tasks() {
               </thead>
               <tbody>
                 <tr>
-                  <td>{myDocs.length}</td>
+                  <td>
+                    {myDocs.map((doc) => (
+                      <div className="assigned-range" key={doc.id}>
+                        <b>{doc.title}</b>
+                        {assignedRows(doc, me.u).map((range) => (
+                          <div key={`${range.start}-${range.end}`}>
+                            {L("Rows")} {range.start}–{range.end}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </td>
                   <td>{myDocs.filter((d) => d.done).length}</td>
                   <td>{myDocs.filter((d) => !d.done).length}</td>
                   <td>

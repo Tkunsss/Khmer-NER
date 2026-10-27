@@ -19,6 +19,7 @@ const KM = {
   "My progress": "វឌ្ឍនភាពរបស់ខ្ញុំ",
   Annotator: "អ្នកដាក់ស្លាក",
   Assigned: "បានចាត់ចែង",
+  Rows: "ជួរ",
   Done: "រួចរាល់",
   Remaining: "នៅសល់",
   Completion: "ការបញ្ចប់",

@@ -615,7 +615,11 @@ function Annotate() {
         ? myRowAssignments.some(
             (assignment) => row >= assignment.start && row <= assignment.end,
           )
-        : fullDocumentAssigned);
+        : fullDocumentAssigned),
+    rowLimit =
+      me.role === "admin" || fullDocumentAssigned || !myRowAssignments.length
+        ? lines.length
+        : Math.max(...myRowAssignments.map((assignment) => assignment.end));
   const sel = () =>
     setTimeout(() => {
       const s = getSelection();
@@ -735,7 +739,7 @@ function Annotate() {
             onSubmit={(e) => {
               e.preventDefault();
               const row = Number(lineInput);
-              if (Number.isInteger(row) && row >= 1 && row <= lines.length) {
+              if (Number.isInteger(row) && row >= 1 && row <= rowLimit) {
                 setPending(null);
                 setLineIndex(row - 1);
               }
@@ -746,26 +750,26 @@ function Annotate() {
               id="row-number"
               type="number"
               min="1"
-              max={lines.length}
+              max={rowLimit}
               step="1"
               value={lineInput}
               onChange={(e) => setLineInput(e.target.value)}
               style={{ width: 76 }}
             />
-            <span className="mut">/ {lines.length}</span>
+            <span className="mut">/ {rowLimit}</span>
             <button
               type="submit"
               disabled={
                 !Number.isInteger(Number(lineInput)) ||
                 Number(lineInput) < 1 ||
-                Number(lineInput) > lines.length
+                Number(lineInput) > rowLimit
               }
             >
               {L("Go")}
             </button>
           </form>
           <button
-            disabled={currentLineIndex >= lines.length - 1}
+            disabled={currentLineIndex >= rowLimit - 1}
             onClick={() => {
               const nextIndex = currentLineIndex + 1;
               setPending(null);

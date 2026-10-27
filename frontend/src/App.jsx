@@ -504,10 +504,12 @@ function Annotate() {
     box = useRef(null),
     [lineIndex, setLineIndex] = useState(0),
     [lineInput, setLineInput] = useState("1"),
+    [pending, setPending] = useState(null),
     d = db.docs.find((x) => x.id === cur);
   useEffect(() => {
     setLineIndex(0);
     setLineInput("1");
+    setPending(null);
   }, [cur]);
   const undo = () => {
     if (!d) return;
@@ -520,11 +522,25 @@ function Annotate() {
         ),
       );
   };
+  const chooseLabel = (label) => {
+    if (!pending) {
+      setAct(label);
+      return;
+    }
+    run(async () => {
+      await api("POST", "/docs/" + d.id + "/anns", {
+        start: pending.start,
+        end: pending.end,
+        label,
+      });
+      setPending(null);
+    });
+  };
   useEffect(() => {
     const k = (e) => {
       if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
       if (/^[1-9]$/.test(e.key) && db.labels[e.key - 1])
-        setAct(db.labels[e.key - 1].n);
+        chooseLabel(db.labels[e.key - 1].n);
       else if ((e.ctrlKey || e.metaKey) && e.key === "z") {
         e.preventDefault();
         undo();
@@ -563,13 +579,7 @@ function Annotate() {
       [st, en] = snap(t, st, en);
       if (en <= st) return;
       s.removeAllRanges();
-      run(() =>
-        api("POST", "/docs/" + d.id + "/anns", {
-          start: st,
-          end: en,
-          label: cl,
-        }),
-      );
+      setPending({ start: st, end: en });
     }, 50);
   const a = [...d.anns].sort((x, y) => x.s - y.s);
   const currentLineIndex = Math.min(lineIndex, lines.length - 1),
@@ -632,12 +642,12 @@ function Annotate() {
           {db.labels.map((l, i) => (
             <button
               key={l.n}
-              className={"chip" + (cl === l.n ? " on" : "")}
+              className={"chip" + (!pending && cl === l.n ? " on" : "")}
               style={{
                 borderColor: l.c,
-                ...(cl === l.n ? { background: l.c } : {}),
+                ...(!pending && cl === l.n ? { background: l.c } : {}),
               }}
-              onClick={() => setAct(l.n)}
+              onClick={() => chooseLabel(l.n)}
             >
               {i < 9 ? i + 1 + " " : ""}
               {l.n}
@@ -645,8 +655,14 @@ function Annotate() {
           ))}
         </div>
         <p className="mut" style={{ margin: "4px 0" }}>
-          {L(
-            "Select text to tag it with the chosen label. Keys 1-9 pick a label.",
+          {pending ? (
+            <>
+              {L("Choose a label for selected text:")}{" "}
+              <b>{d.text.slice(pending.start, pending.end)}</b>{" "}
+              <button onClick={() => setPending(null)}>{L("Cancel")}</button>
+            </>
+          ) : (
+            L("Select text to tag it with the chosen label. Keys 1-9 pick a label.")
           )}
         </p>
         {!rowAssigned(currentLineIndex + 1) && (
@@ -657,6 +673,7 @@ function Annotate() {
             disabled={currentLineIndex === 0}
             onClick={() => {
               const nextIndex = currentLineIndex - 1;
+              setPending(null);
               setLineIndex(nextIndex);
               setLineInput(String(nextIndex + 1));
             }}
@@ -669,8 +686,10 @@ function Annotate() {
             onSubmit={(e) => {
               e.preventDefault();
               const row = Number(lineInput);
-              if (Number.isInteger(row) && row >= 1 && row <= lines.length)
+              if (Number.isInteger(row) && row >= 1 && row <= lines.length) {
+                setPending(null);
                 setLineIndex(row - 1);
+              }
             }}
           >
             <label htmlFor="row-number">{L("Row")}</label>
@@ -700,6 +719,7 @@ function Annotate() {
             disabled={currentLineIndex >= lines.length - 1}
             onClick={() => {
               const nextIndex = currentLineIndex + 1;
+              setPending(null);
               setLineIndex(nextIndex);
               setLineInput(String(nextIndex + 1));
             }}

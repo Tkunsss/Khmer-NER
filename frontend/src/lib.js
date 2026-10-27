@@ -40,6 +40,7 @@ const KM = {
   Open: "បើក",
   Delete: "លុប",
   Remove: "ដកចេញ",
+  Cancel: "បោះបង់",
   Approve: "អនុម័ត",
   Return: "បញ្ជូនត្រឡប់",
   "Reviewer note": "កំណត់ចំណាំ",
@@ -70,7 +71,8 @@ const KM = {
   "New password": "ពាក្យសម្ងាត់ថ្មី",
   "Change password": "ប្តូរពាក្យសម្ងាត់",
   "Select text to tag it with the chosen label. Keys 1-9 pick a label.":
-    "ជ្រើសអត្ថបទ ដើម្បីដាក់ស្លាក។ ចុចលេខ 1-9 ដើម្បីជ្រើសស្លាក។",
+    "ជ្រើសអត្ថបទ រួចជ្រើសស្លាក។ ចុចលេខ 1-9 ដើម្បីជ្រើសស្លាក។",
+  "Choose a label for selected text:": "ជ្រើសស្លាកសម្រាប់អត្ថបទដែលបានជ្រើស៖",
   "Your password is weak. Change it in Account.":
     "ពាក្យសម្ងាត់របស់អ្នកខ្សោយ។ សូមប្តូរនៅក្នុងគណនី។",
   "No entities yet.": "មិនទាន់មានអង្គភាព។",

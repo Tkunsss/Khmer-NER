@@ -343,7 +343,13 @@ function Tasks() {
   const { L, me, db, run, qf, setQf, setCur, setTab } = useContext(C),
     A = me.role === "admin",
     an = db.users.filter((u) => u.role === "annotator"),
-    ds = db.docs.filter((d) => !qf || (d.title + d.text).includes(qf));
+    ds = db.docs.filter((d) => !qf || (d.title + d.text).includes(qf)),
+    myDocs = db.docs.filter(
+      (d) =>
+        d.assignees?.includes(me.u) ||
+        d.as === me.u ||
+        d.rowAssignments?.some((assignment) => assignment.username === me.u),
+    );
   return (
     <>
       {A && (
@@ -403,17 +409,19 @@ function Tasks() {
               </thead>
               <tbody>
                 <tr>
-                  <td>{db.docs.length}</td>
-                  <td>{db.docs.filter((d) => d.done).length}</td>
-                  <td>{db.docs.filter((d) => !d.done).length}</td>
+                  <td>{myDocs.length}</td>
+                  <td>{myDocs.filter((d) => d.done).length}</td>
+                  <td>{myDocs.filter((d) => !d.done).length}</td>
                   <td>
-                    {db.docs.reduce((total, d) => total + d.anns.length, 0)}
+                    {myDocs.reduce(
+                      (total, d) => total + (d.anns || []).length,
+                      0,
+                    )}
                   </td>
                   <td>
-                    {db.docs.length
+                    {myDocs.length
                       ? Math.round(
-                          (db.docs.filter((d) => d.done).length /
-                            db.docs.length) *
+                          (myDocs.filter((d) => d.done).length / myDocs.length) *
                             100,
                         )
                       : 0}

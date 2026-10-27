@@ -441,9 +441,9 @@ function Tasks() {
 function Annotate() {
   const { L, me, db, run, cur, act, setAct, snapOn, setSnapOn } = useContext(C),
     box = useRef(null),
-    [rowIndex, setRowIndex] = useState(0),
+    [lineIndex, setLineIndex] = useState(0),
     d = db.docs.find((x) => x.id === cur);
-  useEffect(() => setRowIndex(0), [cur]);
+  useEffect(() => setLineIndex(0), [cur]);
   const undo = () => {
     if (!d) return;
     const m = d.anns.filter((n) => n.by === me.u);
@@ -502,33 +502,50 @@ function Annotate() {
       );
     }, 50);
   const a = [...d.anns].sort((x, y) => x.s - y.s),
-    currentIndex = Math.min(rowIndex, Math.max(0, a.length - 1)),
+    lines = [];
+  let lineStart = 0;
+  for (let i = 0; i < d.text.length; i++) {
+    if (d.text[i] === "\n" || d.text[i] === "\r") {
+      lines.push({ start: lineStart, end: i, text: d.text.slice(lineStart, i) });
+      if (d.text[i] === "\r" && d.text[i + 1] === "\n") i++;
+      lineStart = i + 1;
+    }
+  }
+  lines.push({
+    start: lineStart,
+    end: d.text.length,
+    text: d.text.slice(lineStart),
+  });
+  const currentLineIndex = Math.min(lineIndex, lines.length - 1),
+    currentLine = lines[currentLineIndex],
     parts = [];
-  let o = 0;
-  a.forEach((n) => {
-    if (n.s > o)
+  let o = currentLine.start;
+  a.filter((n) => n.e > currentLine.start && n.s < currentLine.end).forEach((n) => {
+    const start = Math.max(n.s, currentLine.start),
+      end = Math.min(n.e, currentLine.end);
+    if (start > o)
       parts.push(
         <span key={"t" + o} data-o={o}>
-          {d.text.slice(o, n.s)}
+          {d.text.slice(o, start)}
         </span>,
       );
     const c = col(n.l);
     parts.push(
       <mark
         key={n.id}
-        data-o={n.s}
+        data-o={start}
         style={{ background: c + "33", borderBottom: "3px solid " + c }}
       >
-        {d.text.slice(n.s, n.e)}
+        {d.text.slice(start, end)}
         <sup>{n.l}</sup>
       </mark>,
     );
-    o = n.e;
+    o = end;
   });
-  if (o < d.text.length)
+  if (o < currentLine.end)
     parts.push(
       <span key="end" data-o={o}>
-        {d.text.slice(o)}
+        {d.text.slice(o, currentLine.end)}
       </span>,
     );
   return (
@@ -575,28 +592,28 @@ function Annotate() {
             "Select text to tag it with the chosen label. Keys 1-9 pick a label.",
           )}
         </p>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <button
+            disabled={currentLineIndex === 0}
+            onClick={() => setLineIndex(currentLineIndex - 1)}
+          >
+            {L("Previous")}
+          </button>
+          <span className="mut">
+            {currentLineIndex + 1} / {lines.length}
+          </span>
+          <button
+            disabled={currentLineIndex >= lines.length - 1}
+            onClick={() => setLineIndex(currentLineIndex + 1)}
+          >
+            {L("Next")}
+          </button>
+        </div>
         <div id="txt" ref={box} onMouseUp={sel} onTouchEnd={sel}>
           {parts}
         </div>
       </div>
       <div className="card tw">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <button
-            disabled={!a.length || currentIndex === 0}
-            onClick={() => setRowIndex(currentIndex - 1)}
-          >
-            {L("Previous")}
-          </button>
-          <span className="mut">
-            {a.length ? `${currentIndex + 1} / ${a.length}` : "0 / 0"}
-          </span>
-          <button
-            disabled={!a.length || currentIndex >= a.length - 1}
-            onClick={() => setRowIndex(currentIndex + 1)}
-          >
-            {L("Next")}
-          </button>
-        </div>
         <table>
           <thead>
             <tr>
@@ -607,7 +624,7 @@ function Annotate() {
             </tr>
           </thead>
           <tbody>
-            {a.slice(currentIndex, currentIndex + 1).map((n) => (
+            {a.map((n) => (
               <tr key={n.id}>
                 <td>{d.text.slice(n.s, n.e)}</td>
                 <td>

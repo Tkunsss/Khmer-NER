@@ -55,6 +55,11 @@ const query = async (executor, sql, params = []) => {
     ? { rows: result, rowCount: result.length }
     : { rows: [], rowCount: result.affectedRows, insertId: result.insertId };
 };
+const deleteImportChunks = (executor, uploadId, username) =>
+  executor.query(
+    "delete from import_chunks where upload_id=? and username=?",
+    [uploadId, username],
+  );
 pool.query = (sql, params) => query(pool, sql, params);
 pool.connect = async () => {
   const connection = await pool.getConnection();
@@ -514,6 +519,7 @@ app.post(
       );
       if (Number(found.rows[0].n) !== chunks) {
         await c.rollback();
+        await deleteImportChunks(c, uploadId, q.u.u);
         return err(s, 400, "The upload is incomplete. Please select the file again.");
       }
       const id = (
@@ -529,6 +535,7 @@ app.post(
         );
         if (rows.rows.length !== Math.min(8, chunks - start)) {
           await c.rollback();
+          await deleteImportChunks(c, uploadId, q.u.u);
           return err(s, 400, "The upload is incomplete. Please select the file again.");
         }
         const text = rows.rows.map((row, offset) => {
@@ -537,11 +544,20 @@ app.post(
         }).join("");
         await c.query("update docs set body=concat(body,?) where id=?", [text, id]);
       }
-      await c.query("delete from import_chunks where upload_id=? and username=?", [uploadId, q.u.u]);
+      await deleteImportChunks(c, uploadId, q.u.u);
       await c.commit();
       s.json({ count: 1 });
     } catch (e) {
-      await c.rollback();
+      try {
+        await c.rollback();
+      } catch (rollbackError) {
+        console.error("Failed to roll back import transaction", rollbackError);
+      }
+      try {
+        await deleteImportChunks(c, uploadId, q.u.u);
+      } catch (cleanupError) {
+        console.error("Failed to clean up chunks after import failure", cleanupError);
+      }
       throw e;
     } finally {
       c.release();

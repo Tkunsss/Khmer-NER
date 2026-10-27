@@ -442,8 +442,12 @@ function Annotate() {
   const { L, me, db, run, cur, act, setAct, snapOn, setSnapOn } = useContext(C),
     box = useRef(null),
     [lineIndex, setLineIndex] = useState(0),
+    [lineInput, setLineInput] = useState("1"),
     d = db.docs.find((x) => x.id === cur);
-  useEffect(() => setLineIndex(0), [cur]);
+  useEffect(() => {
+    setLineIndex(0);
+    setLineInput("1");
+  }, [cur]);
   const undo = () => {
     if (!d) return;
     const m = d.anns.filter((n) => n.by === me.u);
@@ -595,16 +599,54 @@ function Annotate() {
         <div className="row" style={{ justifyContent: "space-between" }}>
           <button
             disabled={currentLineIndex === 0}
-            onClick={() => setLineIndex(currentLineIndex - 1)}
+            onClick={() => {
+              const nextIndex = currentLineIndex - 1;
+              setLineIndex(nextIndex);
+              setLineInput(String(nextIndex + 1));
+            }}
           >
             {L("Previous")}
           </button>
-          <span className="mut">
-            {currentLineIndex + 1} / {lines.length}
-          </span>
+          <form
+            className="row"
+            style={{ margin: 0 }}
+            onSubmit={(e) => {
+              e.preventDefault();
+              const row = Number(lineInput);
+              if (Number.isInteger(row) && row >= 1 && row <= lines.length)
+                setLineIndex(row - 1);
+            }}
+          >
+            <label htmlFor="row-number">{L("Row")}</label>
+            <input
+              id="row-number"
+              type="number"
+              min="1"
+              max={lines.length}
+              step="1"
+              value={lineInput}
+              onChange={(e) => setLineInput(e.target.value)}
+              style={{ width: 76 }}
+            />
+            <span className="mut">/ {lines.length}</span>
+            <button
+              type="submit"
+              disabled={
+                !Number.isInteger(Number(lineInput)) ||
+                Number(lineInput) < 1 ||
+                Number(lineInput) > lines.length
+              }
+            >
+              {L("Go")}
+            </button>
+          </form>
           <button
             disabled={currentLineIndex >= lines.length - 1}
-            onClick={() => setLineIndex(currentLineIndex + 1)}
+            onClick={() => {
+              const nextIndex = currentLineIndex + 1;
+              setLineIndex(nextIndex);
+              setLineInput(String(nextIndex + 1));
+            }}
           >
             {L("Next")}
           </button>

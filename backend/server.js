@@ -68,7 +68,7 @@ pool.connect = async () => {
 };
 const app = express();
 app.set("trust proxy", 1);
-app.use(helmet(), cookieParser(), express.json({ limit: "2mb" }));
+app.use(helmet(), cookieParser(), express.json({ limit: "25mb" }));
 const h = (f) => (q, s) =>
   f(q, s).catch((e) => {
     console.error(e);
@@ -610,6 +610,11 @@ app.post(
     await pool.query(
       "insert into labels(name,color) values('PER','#ef4444'),('LOC','#10b981'),('ORG','#3b82f6')",
     );
+  app.use((e, q, s, n) => {
+    if (e.type === "entity.too.large")
+      return err(s, 413, "Import is too large. The maximum request size is 25 MB.");
+    n(e);
+  });
   app.listen(process.env.PORT || 3000, () => console.log("API ready"));
 })().catch((e) => {
   console.error(e);

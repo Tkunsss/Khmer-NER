@@ -168,12 +168,6 @@ app.patch(
   "/api/anns/:id",
   h(async (q, s) => {
     try {
-      const label = q.body.label;
-      if (q.u.role === "annotator" && !(await pool.query(
-        "select 1 from annotator_labels where username=? and label=?",
-        [q.u.u, label],
-      )).rowCount)
-        return err(s, 400, "That label is not assigned to you.");
       await pool.query(
         "update anns a join docs d on d.id=a.doc_id set a.label=? where a.id=? and (? or d.assignee=? or exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?))",
         [q.body.label, +q.params.id, q.u.role === "admin", q.u.u, q.u.u],
@@ -244,27 +238,9 @@ app.delete(
 app.get(
   "/api/labels",
   h(async (q, s) => {
-    s.json((await pool.query(
-      `select l.name n,l.color c from labels l ${q.u.role === "annotator" ? "join annotator_labels al on al.label=l.name and al.username=?" : ""} order by l.name`,
-      q.u.role === "annotator" ? [q.u.u] : [],
-    )).rows);
+    s.json((await pool.query("select name n,color c from labels order by name")).rows);
   }),
 );
-app.put("/api/users/:u/labels", admin, h(async (q, s) => {
-  const { u } = q.params, labels = q.body.labels;
-  if (!Array.isArray(labels) || !(await pool.query("select 1 from users where username=? and user_role='annotator'", [u])).rowCount)
-    return err(s, 400, "Choose an annotator and labels.");
-  const c = await pool.connect();
-  try {
-    await c.begin();
-    await c.query("delete from annotator_labels where username=?", [u]);
-    for (const label of [...new Set(labels)]) await c.query("insert into annotator_labels(username,label) values(?,?)", [u,label]);
-    await c.commit(); s.json({ok:1});
-  } catch (e) { await c.rollback(); throw e; } finally { c.release(); }
-}));
-app.get("/api/users/:u/labels", admin, h(async (q, s) => {
-  s.json((await pool.query("select label from annotator_labels where username=? order by label", [q.params.u])).rows.map((r) => r.label));
-}));
 app.post(
   "/api/labels",
   admin,
@@ -424,10 +400,6 @@ app.post(
     ).rows[0];
     if (!d || (q.u.role !== "admin" && d.assignee !== q.u.u && !(await pool.query("select 1 from doc_assignments where doc_id=? and username=?", [id,q.u.u])).rowCount))
       return err(s, 404, "Document not found.");
-    if (q.u.role === "annotator") {
-      if (!(await pool.query("select 1 from annotator_labels where username=? and label=?", [q.u.u,label])).rowCount)
-        return err(s, 400, "That label is not assigned to you.");
-    }
     if (
       !Number.isInteger(a) ||
       !Number.isInteger(b) ||
@@ -615,11 +587,6 @@ app.post(
             a.end > d.text.length
           )
             continue;
-          if (u.role === "annotator" && !(await c.query(
-            "select 1 from annotator_labels where username=? and label=?",
-            [u.u, a.label],
-          )).rowCount)
-            continue;
           await c.query(
             "insert ignore into labels(name,color) values(?,'#888')",
             [a.label],
@@ -651,12 +618,6 @@ app.post(
   await pool.query(`create table if not exists labels (
     name varchar(30) primary key,
     color char(7) not null
-  ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
-  await pool.query(`create table if not exists annotator_labels (
-    username varchar(32) not null, label varchar(30) not null,
-    primary key(username,label),
-    constraint annotator_labels_user_fk foreign key(username) references users(username) on delete cascade,
-    constraint annotator_labels_label_fk foreign key(label) references labels(name) on delete cascade
   ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
   await pool.query(`create table if not exists docs (
     id bigint unsigned not null auto_increment primary key,

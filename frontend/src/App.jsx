@@ -797,14 +797,7 @@ function Data() {
 function Labels() {
   const { L, db, run } = useContext(C),
     [n, setN] = useState(""),
-    [c, setC] = useState("#f59e0b"),
-    [target, setTarget] = useState(""),
-    [assigned, setAssigned] = useState([]);
-  useEffect(() => {
-    if (!target) { setAssigned([]); return; }
-    api("GET", "/users/" + encodeURIComponent(target) + "/labels")
-      .then(setAssigned).catch(() => setAssigned([]));
-  }, [target]);
+    [c, setC] = useState("#f59e0b");
   return (
     <div className="card">
       <div className="row">
@@ -848,25 +841,6 @@ function Labels() {
           </span>
         ))}
       </div>
-      {db.users.some((u) => u.role === "annotator") && (
-        <div style={{ marginTop: 12 }}>
-          <div className="row">
-            <label>{L("Assign labels to annotator")}</label>
-            <select value={target} onChange={(e) => setTarget(e.target.value)}>
-              <option value="">{L("Choose annotator")}</option>
-              {db.users.filter((u) => u.role === "annotator").map((u) => <option key={u.u} value={u.u}>{u.u}</option>)}
-            </select>
-          </div>
-          {target && <>
-            <div className="row" style={{ marginTop: 6 }}>
-              {db.labels.map((l) => <label key={l.n} className="chip">
-                <input type="checkbox" checked={assigned.includes(l.n)} onChange={(e) => setAssigned((old) => e.target.checked ? [...old, l.n] : old.filter((x) => x !== l.n))} /> {l.n}
-              </label>)}
-            </div>
-            <button className="p" style={{ marginTop: 6 }} onClick={() => run(() => api("PUT", "/users/" + encodeURIComponent(target) + "/labels", { labels: assigned }))}>{L("Save label assignment")}</button>
-          </>}
-        </div>
-      )}
     </div>
   );
 }

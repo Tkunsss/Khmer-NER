@@ -43,7 +43,8 @@ again.
 
 Admins can assign documents only to annotator accounts and view each
 annotator's assigned, completed, and annotated-document totals. Annotators can
-view their own assigned, completed, remaining, and entity totals in My progress.
+view their own assigned, completed, remaining, and entity totals in My progress,
+and can annotate using any available label.
 Only admins can create or manage user accounts.
 
 Import accepts text-based files and text typed or pasted into the import box.

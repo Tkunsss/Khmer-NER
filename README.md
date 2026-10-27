@@ -47,8 +47,9 @@ view their own assigned, completed, remaining, and entity totals in My progress.
 Only admins can create or manage user accounts.
 
 Import accepts text-based files and text typed or pasted into the import box.
-Each plain-text import is kept as one document. Export downloads the available
-documents and annotations as a JSON file.
+Each plain-text import is kept as one document. Files larger than 4 MB upload in
+small chunks, so 100 MB text files do not need to fit in a single API request.
+Export downloads the available documents and annotations as a JSON file.
 
 No backend: run `npm install` and `npm run demo` from `frontend` (data stays in
 your browser; demo login is admin / admin123).

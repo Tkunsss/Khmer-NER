@@ -68,7 +68,7 @@ pool.connect = async () => {
 };
 const app = express();
 app.set("trust proxy", 1);
-app.use(helmet(), cookieParser(), express.json({ limit: "25mb" }));
+app.use(helmet(), cookieParser(), express.json({ limit: "2mb" }));
 const h = (f) => (q, s) =>
   f(q, s).catch((e) => {
     console.error(e);
@@ -471,6 +471,84 @@ app.delete(
 
 // import
 app.post(
+  "/api/import/chunk",
+  h(async (q, s) => {
+    const { uploadId, index, chunk } = q.body || {};
+    if (
+      typeof uploadId !== "string" ||
+      !/^[0-9a-f-]{36}$/i.test(uploadId) ||
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= 4096 ||
+      typeof chunk !== "string" ||
+      chunk.length > 1200000
+    )
+      return err(s, 400, "Invalid import chunk.");
+    if (index === 0)
+      await pool.query("delete from import_chunks where created_at < now() - interval 1 day");
+    await pool.query(
+      "insert into import_chunks(upload_id,username,chunk_index,chunk) values(?,?,?,?) on duplicate key update chunk=values(chunk),created_at=current_timestamp",
+      [uploadId, q.u.u, index, chunk],
+    );
+    s.json({ ok: 1 });
+  }),
+);
+app.post(
+  "/api/import/finish",
+  h(async (q, s) => {
+    const { uploadId, chunks, title } = q.body || {};
+    if (
+      typeof uploadId !== "string" ||
+      !/^[0-9a-f-]{36}$/i.test(uploadId) ||
+      !Number.isInteger(chunks) ||
+      chunks < 1 ||
+      chunks > 4096
+    )
+      return err(s, 400, "Invalid import upload.");
+    const c = await pool.connect();
+    try {
+      await c.begin();
+      const found = await c.query(
+        "select count(*) as n from import_chunks where upload_id=? and username=?",
+        [uploadId, q.u.u],
+      );
+      if (Number(found.rows[0].n) !== chunks) {
+        await c.rollback();
+        return err(s, 400, "The upload is incomplete. Please select the file again.");
+      }
+      const id = (
+        await c.query(
+          "insert into docs(title,body,assignee,done,note) values(?,?,?,0,'')",
+          [String(title || "Untitled").slice(0, 1000), "", q.u.role === "admin" ? null : q.u.u],
+        )
+      ).insertId;
+      for (let start = 0; start < chunks; start += 8) {
+        const rows = await c.query(
+          "select chunk_index,chunk from import_chunks where upload_id=? and username=? and chunk_index>=? and chunk_index<? order by chunk_index",
+          [uploadId, q.u.u, start, Math.min(start + 8, chunks)],
+        );
+        if (rows.rows.length !== Math.min(8, chunks - start)) {
+          await c.rollback();
+          return err(s, 400, "The upload is incomplete. Please select the file again.");
+        }
+        const text = rows.rows.map((row, offset) => {
+          if (row.chunk_index !== start + offset) throw new Error("Invalid import chunk sequence");
+          return row.chunk;
+        }).join("");
+        await c.query("update docs set body=concat(body,?) where id=?", [text, id]);
+      }
+      await c.query("delete from import_chunks where upload_id=? and username=?", [uploadId, q.u.u]);
+      await c.commit();
+      s.json({ count: 1 });
+    } catch (e) {
+      await c.rollback();
+      throw e;
+    } finally {
+      c.release();
+    }
+  }),
+);
+app.post(
   "/api/import",
   h(async (q, s) => {
     const { labels = [], docs = [] } = q.body,
@@ -581,6 +659,16 @@ app.post(
     constraint doc_assignments_doc_fk foreign key(doc_id) references docs(id) on delete cascade,
     constraint doc_assignments_user_fk foreign key(username) references users(username) on delete cascade
   ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
+  await pool.query(`create table if not exists import_chunks (
+    upload_id char(36) not null,
+    username varchar(32) not null,
+    chunk_index int unsigned not null,
+    chunk longtext not null,
+    created_at timestamp not null default current_timestamp on update current_timestamp,
+    primary key(upload_id,username,chunk_index),
+    index import_chunks_created_at(created_at),
+    constraint import_chunks_user_fk foreign key(username) references users(username) on delete cascade
+  ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
   await pool.query("insert ignore into doc_assignments(doc_id,username) select id,assignee from docs where assignee is not null");
   await pool.query(`create table if not exists anns (
     id bigint unsigned not null auto_increment primary key,
@@ -612,7 +700,7 @@ app.post(
     );
   app.use((e, q, s, n) => {
     if (e.type === "entity.too.large")
-      return err(s, 413, "Import is too large. The maximum request size is 25 MB.");
+      return err(s, 413, "Request is too large. Large files are uploaded in smaller chunks.");
     n(e);
   });
   app.listen(process.env.PORT || 3000, () => console.log("API ready"));

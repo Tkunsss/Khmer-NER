@@ -118,7 +118,6 @@ export default function App() {
     T = [
       ["tasks", A ? "Documents" : "My documents"],
       ["annotate", "Annotate"],
-      ["data", "Data"],
       ...(A ? [["labels", "Labels"]] : []),
       ...(A ? [["users", "Users"]] : []),
       ["io", "Import / Export"],
@@ -1004,6 +1003,33 @@ function IO() {
   };
   const files = async (fs) => {
     for (const f of [...fs]) {
+      if (f.size > 4 * 1024 * 1024) {
+        const uploadId = crypto.randomUUID(),
+          chunkBytes = 1024 * 1024,
+          decoder = new TextDecoder("utf-8");
+        let index = 0;
+        for (let offset = 0; offset < f.size; offset += chunkBytes) {
+          const end = Math.min(offset + chunkBytes, f.size),
+            bytes = await f.slice(offset, end).arrayBuffer(),
+            chunk = decoder.decode(bytes, { stream: end < f.size });
+          if (chunk)
+            await api("POST", "/import/chunk", { uploadId, index: index++, chunk });
+          if (index % 8 === 0)
+            setMsg(`Uploading ${f.name}: ${Math.round((end / f.size) * 100)}%`);
+        }
+        const rest = decoder.decode();
+        if (rest)
+          await api("POST", "/import/chunk", { uploadId, index: index++, chunk: rest });
+        setMsg(`Finishing import: ${f.name}`);
+        const r = await api("POST", "/import/finish", {
+          uploadId,
+          chunks: index,
+          title: f.name,
+        });
+        await load(me.role);
+        setMsg("Imported " + r.count + " document(s).");
+        continue;
+      }
       const raw = await new Promise((resolve, reject) => {
         const r = new FileReader();
         r.onload = () => resolve(r.result);

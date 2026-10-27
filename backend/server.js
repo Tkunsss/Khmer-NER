@@ -522,18 +522,20 @@ app.post(
           [String(title || "Untitled").slice(0, 1000), "", q.u.role === "admin" ? null : q.u.u],
         )
       ).insertId;
-      for (let start = 0; start < chunks; start++) {
+      for (let start = 0; start < chunks; start += 8) {
         const rows = await c.query(
-          "select chunk_index,chunk from import_chunks where upload_id=? and username=? and chunk_index=?",
-          [uploadId, q.u.u, start],
+          "select chunk_index,chunk from import_chunks where upload_id=? and username=? and chunk_index>=? and chunk_index<? order by chunk_index",
+          [uploadId, q.u.u, start, Math.min(start + 8, chunks)],
         );
-        if (rows.rows.length !== 1) {
+        if (rows.rows.length !== Math.min(8, chunks - start)) {
           await c.rollback();
           return err(s, 400, "The upload is incomplete. Please select the file again.");
         }
-        const row = rows.rows[0];
-        if (row.chunk_index !== start) throw new Error("Invalid import chunk sequence");
-        await c.query("update docs set body=concat(body,?) where id=?", [row.chunk, id]);
+        const text = rows.rows.map((row, offset) => {
+          if (row.chunk_index !== start + offset) throw new Error("Invalid import chunk sequence");
+          return row.chunk;
+        }).join("");
+        await c.query("update docs set body=concat(body,?) where id=?", [text, id]);
       }
       await c.query("delete from import_chunks where upload_id=? and username=?", [uploadId, q.u.u]);
       await c.commit();

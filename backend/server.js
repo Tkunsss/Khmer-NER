@@ -98,6 +98,16 @@ const auth = async (q, s, n) => {
 const admin = (q, s, n) =>
   q.u.role === "admin" ? n() : s.status(403).json({ error: "Admins only." });
 const err = (s, c, m) => s.status(c).json({ error: m });
+const rowForOffset = (text, offset) => {
+  let row = 1;
+  for (let i = 0; i < offset; i++) {
+    if (text[i] === "\r") {
+      row++;
+      if (text[i + 1] === "\n") i++;
+    } else if (text[i] === "\n") row++;
+  }
+  return row;
+};
 app.use(
   "/api",
   rateLimit({
@@ -167,10 +177,38 @@ app.post(
 app.patch(
   "/api/anns/:id",
   h(async (q, s) => {
+    const annotation = (
+      await pool.query(
+        "select a.doc_id,a.s,d.body,d.assignee from anns a join docs d on d.id=a.doc_id where a.id=?",
+        [+q.params.id],
+      )
+    ).rows[0];
+    if (!annotation) return err(s, 404, "Annotation not found.");
+    if (q.u.role !== "admin") {
+      const fullAccess =
+        annotation.assignee === q.u.u ||
+        (
+          await pool.query(
+            "select 1 from doc_assignments where doc_id=? and username=?",
+            [annotation.doc_id, q.u.u],
+          )
+        ).rowCount;
+      const row = rowForOffset(annotation.body, annotation.s);
+      if (
+        !fullAccess &&
+        !(
+          await pool.query(
+            "select 1 from row_assignments where doc_id=? and username=? and row_start<=? and row_end>=?",
+            [annotation.doc_id, q.u.u, row, row],
+          )
+        ).rowCount
+      )
+        return err(s, 403, "This row is not assigned to you.");
+    }
     try {
       await pool.query(
-        "update anns a join docs d on d.id=a.doc_id set a.label=? where a.id=? and (? or d.assignee=? or exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?))",
-        [q.body.label, +q.params.id, q.u.role === "admin", q.u.u, q.u.u],
+        "update anns set label=? where id=?",
+        [q.body.label, +q.params.id],
       );
       s.json({ ok: 1 });
     } catch (e) {
@@ -283,17 +321,32 @@ app.get(
     const a = q.u.role === "admin";
     const docs = await pool.query(
       `select id,title,body,assignee,done,review,note from docs
-       ${a ? "" : "where exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=?"} order by id`,
-      a ? [] : [q.u.u,q.u.u],
+       ${a ? "" : "where exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=docs.id and ra.username=?)"} order by id`,
+      a ? [] : [q.u.u,q.u.u,q.u.u],
     );
     const assignments = await pool.query("select doc_id,username from doc_assignments order by username");
     const assignedByDoc = new Map();
     for (const row of assignments.rows) { const k=String(row.doc_id); if(!assignedByDoc.has(k)) assignedByDoc.set(k,[]); assignedByDoc.get(k).push(row.username); }
+    const rowAssignments = await pool.query(
+      `select doc_id,username,row_start as start,row_end as end from row_assignments
+       ${a ? "" : "where username=?"} order by doc_id,row_start`,
+      a ? [] : [q.u.u],
+    );
+    const rowAssignmentsByDoc = new Map();
+    for (const row of rowAssignments.rows) {
+      const key = String(row.doc_id);
+      if (!rowAssignmentsByDoc.has(key)) rowAssignmentsByDoc.set(key, []);
+      rowAssignmentsByDoc.get(key).push({
+        username: row.username,
+        start: row.start,
+        end: row.end,
+      });
+    }
     const annotations = await pool.query(
       `select x.id,x.doc_id,x.s,x.e,x.label l,x.author \`by\`
        from anns x join docs d on d.id=x.doc_id
-       ${a ? "" : "where (exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?) or d.assignee=?)"} order by x.s`,
-      a ? [] : [q.u.u,q.u.u],
+       ${a ? "" : "where (exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?) or d.assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=d.id and ra.username=?))"} order by x.s`,
+      a ? [] : [q.u.u,q.u.u,q.u.u],
     );
     const annsByDoc = new Map();
     for (const annotation of annotations.rows) {
@@ -307,6 +360,28 @@ app.get(
         by: annotation.by,
       });
     }
+    if (!a) {
+      for (const [docId, anns] of annsByDoc) {
+        const doc = docs.rows.find((row) => String(row.id) === docId);
+        const assignedRows = rowAssignmentsByDoc.get(docId) || [];
+        const fullAccess =
+          doc.assignee === q.u.u ||
+          (assignedByDoc.get(docId) || []).includes(q.u.u);
+        if (!fullAccess)
+          annsByDoc.set(
+            docId,
+            anns.filter((annotation) => {
+              const row = rowForOffset(doc.body, annotation.s);
+              return assignedRows.some(
+                (assignment) =>
+                  assignment.username === q.u.u &&
+                  row >= assignment.start &&
+                  row <= assignment.end,
+              );
+            }),
+          );
+      }
+    }
     s.json(
       docs.rows.map((d) => ({
         id: String(d.id),
@@ -314,6 +389,7 @@ app.get(
         text: d.body,
         assignees: [...new Set([...(assignedByDoc.get(String(d.id)) || []), ...(d.assignee ? [d.assignee] : [])])],
         as: [...new Set([...(assignedByDoc.get(String(d.id)) || []), ...(d.assignee ? [d.assignee] : [])])].join(", "),
+        rowAssignments: rowAssignmentsByDoc.get(String(d.id)) || [],
         done: !!d.done,
         review: d.review,
         note: d.note,
@@ -339,6 +415,15 @@ app.patch(
         );
         if (!annotator.rowCount)
           return err(s, 400, "Choose an annotator or unassign the document.");
+        if (
+          (
+            await pool.query(
+              "select 1 from row_assignments where doc_id=? and username<>? limit 1",
+              [id, assignee],
+            )
+          ).rowCount
+        )
+          return err(s, 409, "Rows are already assigned to another annotator.");
       }
       if (
         !(await pool.query("select 1 from docs where id=?", [id])).rowCount
@@ -355,6 +440,16 @@ app.patch(
       const chosen = [...new Set(q.body.assignees)];
       for (const username of chosen) if (!(await pool.query("select 1 from users where username=? and user_role='annotator'", [username])).rowCount)
         return err(s, 400, "Choose valid annotators.");
+      if (
+        chosen.length &&
+        (
+          await pool.query(
+            `select 1 from row_assignments where doc_id=? and username not in (${chosen.map(() => "?").join(",")}) limit 1`,
+            [id, ...chosen],
+          )
+        ).rowCount
+      )
+        return err(s, 409, "Rows are already assigned to another annotator.");
       const c = await pool.connect();
       try {
         await c.begin(); await c.query("delete from doc_assignments where doc_id=?", [id]);
@@ -362,11 +457,82 @@ app.patch(
         await c.query("update docs set assignee=null where id=?", [id]); await c.commit();
       } catch (e) { await c.rollback(); throw e; } finally { c.release(); }
     }
-    if (done !== undefined)
-      await pool.query(
-        "update docs set done=?,review=case when ? then '' else review end where id=? and (? or assignee=? or exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?))",
-        [!!done, !!done, id, ad, q.u.u, q.u.u],
+    if (q.body.rowAssignment !== undefined) {
+      const { username, start, end } = q.body.rowAssignment || {};
+      if (
+        !ad ||
+        typeof username !== "string" ||
+        !Number.isInteger(start) ||
+        !Number.isInteger(end) ||
+        start < 1 ||
+        end < start
+      )
+        return err(s, 400, "Choose an annotator and a valid row range.");
+      const annotator = await pool.query(
+        "select 1 from users where username=? and user_role='annotator'",
+        [username],
       );
+      if (!annotator.rowCount)
+        return err(s, 400, "Choose a valid annotator.");
+      const c = await pool.connect();
+      try {
+        await c.begin();
+        const doc = await c.query("select body from docs where id=? for update", [id]);
+        if (!doc.rowCount) {
+          await c.rollback();
+          return err(s, 404, "Document not found.");
+        }
+        const rowCount = doc.rows[0].body.split(/\r\n|\r|\n/).length;
+        if (end > rowCount) {
+          await c.rollback();
+          return err(s, 400, "The row range exceeds the document.");
+        }
+        const overlap = await c.query(
+          "select username from row_assignments where doc_id=? and row_start<=? and row_end>=? and username<>? union select username from doc_assignments where doc_id=? and username<>? union select assignee as username from docs where id=? and assignee is not null and assignee<>? limit 1",
+          [id, end, start, username, id, username, id, username],
+        );
+        if (overlap.rowCount) {
+          await c.rollback();
+          return err(s, 409, "Some rows in this range are already assigned to another annotator.");
+        }
+        await c.query(
+          "insert into row_assignments(doc_id,username,row_start,row_end) values(?,?,?,?)",
+          [id, username, start, end],
+        );
+        await c.commit();
+      } catch (e) {
+        await c.rollback();
+        if (e.code === "ER_DUP_ENTRY")
+          return err(s, 409, "This row range is already assigned.");
+        throw e;
+      } finally {
+        c.release();
+      }
+    }
+    if (q.body.removeRowAssignment !== undefined) {
+      const { username, start, end } = q.body.removeRowAssignment || {};
+      if (
+        !ad ||
+        typeof username !== "string" ||
+        !Number.isInteger(start) ||
+        !Number.isInteger(end)
+      )
+        return err(s, 400, "Choose a valid row assignment.");
+      await pool.query(
+        "delete from row_assignments where doc_id=? and username=? and row_start=? and row_end=?",
+        [id, username, start, end],
+      );
+    }
+    if (done !== undefined)
+      if (ad || (await pool.query(
+        "select 1 from docs d where d.id=? and (d.assignee=? or exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?))",
+        [id, q.u.u, q.u.u],
+      )).rowCount)
+        await pool.query(
+          "update docs set done=?,review=case when ? then '' else review end where id=?",
+          [!!done, !!done, id],
+        );
+      else return err(s, 403, "Only a document assignee can change document status.");
     if (review !== undefined) {
       if (!ad) return err(s, 403, "Admins only.");
       await pool.query(
@@ -398,7 +564,7 @@ app.post(
     const d = (
       await pool.query("select body,assignee from docs where id=?", [id])
     ).rows[0];
-    if (!d || (q.u.role !== "admin" && d.assignee !== q.u.u && !(await pool.query("select 1 from doc_assignments where doc_id=? and username=?", [id,q.u.u])).rowCount))
+    if (!d)
       return err(s, 404, "Document not found.");
     if (
       !Number.isInteger(a) ||
@@ -408,6 +574,25 @@ app.post(
       b > d.body.length
     )
       return err(s, 400, "Invalid selection.");
+    if (q.u.role !== "admin" && d.assignee !== q.u.u) {
+      const fullAccess = (
+        await pool.query(
+          "select 1 from doc_assignments where doc_id=? and username=?",
+          [id, q.u.u],
+        )
+      ).rowCount;
+      const startRow = rowForOffset(d.body, a),
+        endRow = rowForOffset(d.body, b - 1);
+      if (
+        !fullAccess &&
+        (startRow !== endRow ||
+          !(await pool.query(
+            "select 1 from row_assignments where doc_id=? and username=? and row_start<=? and row_end>=?",
+            [id, q.u.u, startRow, startRow],
+          )).rowCount)
+      )
+        return err(s, 403, "This row is not assigned to you.");
+    }
     if (
       (
         await pool.query("select 1 from anns where doc_id=? and ?<e and ?>s", [
@@ -438,10 +623,31 @@ app.post(
 app.delete(
   "/api/anns/:id",
   h(async (q, s) => {
-    await pool.query(
-      "delete a from anns a join docs d on d.id=a.doc_id where a.id=? and (? or d.assignee=? or exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?))",
-      [+q.params.id, q.u.role === "admin", q.u.u, q.u.u],
-    );
+    const annotation = (
+      await pool.query(
+        "select a.doc_id,a.s,d.body,d.assignee from anns a join docs d on d.id=a.doc_id where a.id=?",
+        [+q.params.id],
+      )
+    ).rows[0];
+    if (!annotation) return s.json({ ok: 1 });
+    if (q.u.role !== "admin" && annotation.assignee !== q.u.u) {
+      const fullAccess = (
+        await pool.query(
+          "select 1 from doc_assignments where doc_id=? and username=?",
+          [annotation.doc_id, q.u.u],
+        )
+      ).rowCount;
+      const row = rowForOffset(annotation.body, annotation.s);
+      if (
+        !fullAccess &&
+        !(await pool.query(
+          "select 1 from row_assignments where doc_id=? and username=? and row_start<=? and row_end>=?",
+          [annotation.doc_id, q.u.u, row, row],
+        )).rowCount
+      )
+        return err(s, 403, "This row is not assigned to you.");
+    }
+    await pool.query("delete from anns where id=?", [+q.params.id]);
     s.json({ ok: 1 });
   }),
 );
@@ -635,6 +841,16 @@ app.post(
     primary key(doc_id,username),
     constraint doc_assignments_doc_fk foreign key(doc_id) references docs(id) on delete cascade,
     constraint doc_assignments_user_fk foreign key(username) references users(username) on delete cascade
+  ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
+  await pool.query(`create table if not exists row_assignments (
+    doc_id bigint unsigned not null,
+    username varchar(32) not null,
+    row_start int unsigned not null,
+    row_end int unsigned not null,
+    primary key(doc_id,username,row_start,row_end),
+    index row_assignments_lookup(doc_id,username,row_start,row_end),
+    constraint row_assignments_doc_fk foreign key(doc_id) references docs(id) on delete cascade,
+    constraint row_assignments_user_fk foreign key(username) references users(username) on delete cascade
   ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
   await pool.query(`create table if not exists import_chunks (
     upload_id char(36) not null,

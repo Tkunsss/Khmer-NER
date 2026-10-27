@@ -260,6 +260,10 @@ function Assignment({ d, annotators, L, run }) {
   const [selected, setSelected] = useState(current);
   useEffect(() => setSelected(current), [d.assignees, d.as]);
   const changed = selected.length !== current.length || selected.some((u) => !current.includes(u));
+  const rows = documentLines(d.text).length,
+    [username, setUsername] = useState(annotators[0]?.u || ""),
+    [start, setStart] = useState("1"),
+    [end, setEnd] = useState(String(rows));
   return (
     <div className="assignment">
       <details>
@@ -274,8 +278,65 @@ function Assignment({ d, annotators, L, run }) {
           <button className="p" disabled={!changed} onClick={() => run(() => api("PATCH", "/docs/" + d.id, { assignees: selected }))}>{L("Save assignment")}</button>
         </div>
       </details>
+      <details>
+        <summary>{L("Assign row range")} ({rows})</summary>
+        <div className="assignment-options">
+          <label>
+            {L("Annotator")}
+            <select value={username} onChange={(e) => setUsername(e.target.value)}>
+              {annotators.map((u) => <option key={u.u} value={u.u}>{u.u}</option>)}
+            </select>
+          </label>
+          <label>
+            {L("From row")}
+            <input type="number" min="1" max={rows} value={start} onChange={(e) => setStart(e.target.value)} />
+          </label>
+          <label>
+            {L("To row")}
+            <input type="number" min="1" max={rows} value={end} onChange={(e) => setEnd(e.target.value)} />
+          </label>
+          <button
+            className="p"
+            disabled={!annotators.length || !Number.isInteger(+start) || !Number.isInteger(+end) || +start < 1 || +end < +start || +end > rows}
+            onClick={() => run(() => api("PATCH", "/docs/" + d.id, { rowAssignment: { username, start: +start, end: +end } }))}
+          >
+            {L("Assign rows")}
+          </button>
+          {(d.rowAssignments || []).map((assignment) => (
+            <div className="row-assignment" key={`${assignment.username}-${assignment.start}-${assignment.end}`}>
+              <span>{assignment.username}: {assignment.start}–{assignment.end}</span>
+              <button onClick={() => run(() => api("PATCH", "/docs/" + d.id, { removeRowAssignment: assignment }))}>{L("Remove")}</button>
+            </div>
+          ))}
+        </div>
+      </details>
     </div>
   );
+}
+
+function documentLines(text) {
+  const lines = [];
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\n" || text[i] === "\r") {
+      lines.push({ start, end: i });
+      if (text[i] === "\r" && text[i + 1] === "\n") i++;
+      start = i + 1;
+    }
+  }
+  lines.push({ start, end: text.length });
+  return lines;
+}
+
+function rowForOffset(text, offset) {
+  let row = 1;
+  for (let i = 0; i < offset; i++) {
+    if (text[i] === "\r") {
+      row++;
+      if (text[i + 1] === "\n") i++;
+    } else if (text[i] === "\n") row++;
+  }
+  return row;
 }
 
 function Tasks() {
@@ -301,7 +362,7 @@ function Tasks() {
               </thead>
               <tbody>
                 {an.map((u) => {
-                  const d = db.docs.filter((x) => x.assignees?.includes(u.u) || x.as === u.u);
+                  const d = db.docs.filter((x) => x.assignees?.includes(u.u) || x.as === u.u || x.rowAssignments?.some((assignment) => assignment.username === u.u));
                   return (
                     <tr key={u.u}>
                       <td>{u.u}</td>
@@ -480,6 +541,10 @@ function Annotate() {
     );
   const cl = db.labels.some((l) => l.n === act) ? act : db.labels[0]?.n,
     col = (n) => db.labels.find((l) => l.n === n)?.c || "#888";
+  const lines = documentLines(d.text),
+    rowAssignments = d.rowAssignments || [],
+    fullDocumentAssigned = (d.assignees || (d.as ? [d.as] : [])).includes(me.u),
+    rowAssigned = (row) => me.role === "admin" || fullDocumentAssigned || rowAssignments.some((assignment) => assignment.username === me.u && row >= assignment.start && row <= assignment.end);
   const sel = () =>
     setTimeout(() => {
       const s = getSelection();
@@ -492,6 +557,7 @@ function Annotate() {
       const t = d.text;
       let st = +A.dataset.o + r.startOffset,
         en = +B.dataset.o + r.endOffset;
+      if (!rowAssigned(rowForOffset(t, st)) || rowForOffset(t, en - 1) !== rowForOffset(t, st)) return;
       while (st < en && /\s/.test(t[st])) st++;
       while (en > st && /\s/.test(t[en - 1])) en--;
       [st, en] = snap(t, st, en);
@@ -505,21 +571,7 @@ function Annotate() {
         }),
       );
     }, 50);
-  const a = [...d.anns].sort((x, y) => x.s - y.s),
-    lines = [];
-  let lineStart = 0;
-  for (let i = 0; i < d.text.length; i++) {
-    if (d.text[i] === "\n" || d.text[i] === "\r") {
-      lines.push({ start: lineStart, end: i, text: d.text.slice(lineStart, i) });
-      if (d.text[i] === "\r" && d.text[i + 1] === "\n") i++;
-      lineStart = i + 1;
-    }
-  }
-  lines.push({
-    start: lineStart,
-    end: d.text.length,
-    text: d.text.slice(lineStart),
-  });
+  const a = [...d.anns].sort((x, y) => x.s - y.s);
   const currentLineIndex = Math.min(lineIndex, lines.length - 1),
     currentLine = lines[currentLineIndex],
     parts = [];
@@ -558,6 +610,7 @@ function Annotate() {
         <div className="row">
           <b>{d.title}</b>
           <button
+            disabled={me.role !== "admin" && !fullDocumentAssigned}
             onClick={() =>
               run(() => api("PATCH", "/docs/" + d.id, { done: !d.done }))
             }
@@ -596,6 +649,9 @@ function Annotate() {
             "Select text to tag it with the chosen label. Keys 1-9 pick a label.",
           )}
         </p>
+        {!rowAssigned(currentLineIndex + 1) && (
+          <p className="mut">{L("This row is not assigned to you.")}</p>
+        )}
         <div className="row" style={{ justifyContent: "space-between" }}>
           <button
             disabled={currentLineIndex === 0}
@@ -651,7 +707,7 @@ function Annotate() {
             {L("Next")}
           </button>
         </div>
-        <div id="txt" ref={box} onMouseUp={sel} onTouchEnd={sel}>
+        <div id="txt" ref={box} onMouseUp={sel} onTouchEnd={sel} className={rowAssigned(currentLineIndex + 1) ? "" : "unassigned-row"}>
           {parts}
         </div>
       </div>
@@ -1002,7 +1058,7 @@ function IO() {
     [exportAnnotator, setExportAnnotator] = useState("all"),
     [importing, setImporting] = useState(false),
     annotators = db.users.filter((u) => u.role === "annotator"),
-    exportDocs = db.docs.filter((d) => me.role !== "admin" || exportAnnotator === "all" || d.assignees?.includes(exportAnnotator) || d.as === exportAnnotator),
+    exportDocs = db.docs.filter((d) => me.role !== "admin" || exportAnnotator === "all" || d.assignees?.includes(exportAnnotator) || d.as === exportAnnotator || d.rowAssignments?.some((assignment) => assignment.username === exportAnnotator)),
     txt = exportText({ ...db, docs: exportDocs }, me.role === "admin" ? exportAnnotator : "all"),
     annotationCount = exportDocs.reduce((total, d) => total + d.anns.length, 0);
   const imp = async (raw, name) => {

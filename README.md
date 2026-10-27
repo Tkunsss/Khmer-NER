@@ -41,10 +41,12 @@ assigned to them. Deleting a document also deletes its annotations. After a
 file import finishes, the file picker is reset so the same file can be selected
 again.
 
-Admins can assign documents only to annotator accounts and view each
-annotator's assigned, completed, and annotated-document totals. Annotators can
-view their own assigned, completed, remaining, and entity totals in My progress,
-and can annotate using any available label.
+Admins can assign whole documents or specific newline-delimited row ranges to
+annotator accounts. Row-range assignments let annotators highlight only rows
+assigned to them; the API enforces the same row-level access. Admins can view
+each annotator's assigned, completed, and annotated-document totals.
+Annotators can view their own assigned, completed, remaining, and entity totals
+in My progress, and can annotate using any available label.
 Only admins can create or manage user accounts.
 
 Import accepts text-based files and text typed or pasted into the import box.

@@ -118,6 +118,16 @@ input[type="checkbox"] {
 .assignment-options button {
   margin-top: 4px;
 }
+.row-assignment {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.unassigned-row {
+  opacity: 0.6;
+  user-select: none;
+}
 button {
   cursor: pointer;
 }

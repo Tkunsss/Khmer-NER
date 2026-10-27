@@ -441,7 +441,9 @@ function Tasks() {
 function Annotate() {
   const { L, me, db, run, cur, act, setAct, snapOn, setSnapOn } = useContext(C),
     box = useRef(null),
+    [rowIndex, setRowIndex] = useState(0),
     d = db.docs.find((x) => x.id === cur);
+  useEffect(() => setRowIndex(0), [cur]);
   const undo = () => {
     if (!d) return;
     const m = d.anns.filter((n) => n.by === me.u);
@@ -500,6 +502,7 @@ function Annotate() {
       );
     }, 50);
   const a = [...d.anns].sort((x, y) => x.s - y.s),
+    currentIndex = Math.min(rowIndex, Math.max(0, a.length - 1)),
     parts = [];
   let o = 0;
   a.forEach((n) => {
@@ -577,6 +580,23 @@ function Annotate() {
         </div>
       </div>
       <div className="card tw">
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <button
+            disabled={!a.length || currentIndex === 0}
+            onClick={() => setRowIndex(currentIndex - 1)}
+          >
+            {L("Previous")}
+          </button>
+          <span className="mut">
+            {a.length ? `${currentIndex + 1} / ${a.length}` : "0 / 0"}
+          </span>
+          <button
+            disabled={!a.length || currentIndex >= a.length - 1}
+            onClick={() => setRowIndex(currentIndex + 1)}
+          >
+            {L("Next")}
+          </button>
+        </div>
         <table>
           <thead>
             <tr>
@@ -587,7 +607,7 @@ function Annotate() {
             </tr>
           </thead>
           <tbody>
-            {a.map((n) => (
+            {a.slice(currentIndex, currentIndex + 1).map((n) => (
               <tr key={n.id}>
                 <td>{d.text.slice(n.s, n.e)}</td>
                 <td>

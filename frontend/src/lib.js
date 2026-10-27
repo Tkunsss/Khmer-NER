@@ -46,6 +46,8 @@ const KM = {
   Label: "ស្លាក",
   Range: "ចន្លោះ",
   Document: "ឯកសារ",
+  Previous: "មុន",
+  Next: "បន្ទាប់",
   "Add label": "បន្ថែមស្លាក",
   "Label name": "ឈ្មោះស្លាក",
   "Create user": "បង្កើតអ្នកប្រើ",

@@ -340,11 +340,13 @@ function rowForOffset(text, offset) {
 }
 
 function assignedRows(d, username) {
-  if ((d.assignees || (d.as ? [d.as] : [])).includes(username))
-    return [{ start: 1, end: documentLines(d.text).length }];
-  return (d.rowAssignments || [])
+  const rows = (d.rowAssignments || [])
     .filter((assignment) => assignment.username === username)
     .map(({ start, end }) => ({ start, end }));
+  if (rows.length) return rows;
+  if ((d.assignees || (d.as ? [d.as] : [])).includes(username))
+    return [{ start: 1, end: documentLines(d.text).length }];
+  return [];
 }
 
 function Tasks() {

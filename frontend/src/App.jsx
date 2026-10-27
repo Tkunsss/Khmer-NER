@@ -534,12 +534,16 @@ function Annotate() {
         label,
       });
       setPending(null);
+      getSelection()?.removeAllRanges();
     });
   };
   useEffect(() => {
     const k = (e) => {
       if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
-      if (/^[1-9]$/.test(e.key) && db.labels[e.key - 1])
+      if (e.key === "Escape" && pending) {
+        setPending(null);
+        getSelection()?.removeAllRanges();
+      } else if (/^[1-9]$/.test(e.key) && db.labels[e.key - 1])
         chooseLabel(db.labels[e.key - 1].n);
       else if ((e.ctrlKey || e.metaKey) && e.key === "z") {
         e.preventDefault();
@@ -578,8 +582,13 @@ function Annotate() {
       while (en > st && /\s/.test(t[en - 1])) en--;
       [st, en] = snap(t, st, en);
       if (en <= st) return;
-      s.removeAllRanges();
-      setPending({ start: st, end: en });
+      const rect = r.getBoundingClientRect(),
+        left = Math.max(8, Math.min(rect.left, window.innerWidth - 260)),
+        top =
+          rect.bottom + 58 < window.innerHeight
+            ? rect.bottom + 8
+            : Math.max(8, rect.top - 58);
+      setPending({ start: st, end: en, left, top });
     }, 50);
   const a = [...d.anns].sort((x, y) => x.s - y.s);
   const currentLineIndex = Math.min(lineIndex, lines.length - 1),
@@ -638,14 +647,14 @@ function Annotate() {
           </label>
         </div>
         {d.review === "returned" && d.note && <p className="err">{d.note}</p>}
-        <div className="row">
+        {!pending && <div className="row">
           {db.labels.map((l, i) => (
             <button
               key={l.n}
-              className={"chip" + (!pending && cl === l.n ? " on" : "")}
+              className={"chip" + (cl === l.n ? " on" : "")}
               style={{
                 borderColor: l.c,
-                ...(!pending && cl === l.n ? { background: l.c } : {}),
+                ...(cl === l.n ? { background: l.c } : {}),
               }}
               onClick={() => chooseLabel(l.n)}
             >
@@ -653,17 +662,9 @@ function Annotate() {
               {l.n}
             </button>
           ))}
-        </div>
+        </div>}
         <p className="mut" style={{ margin: "4px 0" }}>
-          {pending ? (
-            <>
-              {L("Choose a label for selected text:")}{" "}
-              <b>{d.text.slice(pending.start, pending.end)}</b>{" "}
-              <button onClick={() => setPending(null)}>{L("Cancel")}</button>
-            </>
-          ) : (
-            L("Select text to tag it with the chosen label. Keys 1-9 pick a label.")
-          )}
+          {L("Select text to tag it with the chosen label. Keys 1-9 pick a label.")}
         </p>
         {!rowAssigned(currentLineIndex + 1) && (
           <p className="mut">{L("This row is not assigned to you.")}</p>
@@ -730,6 +731,37 @@ function Annotate() {
         <div id="txt" ref={box} onMouseUp={sel} onTouchEnd={sel} className={rowAssigned(currentLineIndex + 1) ? "" : "unassigned-row"}>
           {parts}
         </div>
+        {pending && (
+          <div
+            className="label-picker"
+            style={{ left: pending.left, top: pending.top }}
+            role="group"
+            aria-label={L("Choose a label for selected text:")}
+          >
+            <b>{d.text.slice(pending.start, pending.end)}</b>
+            <div className="label-picker-options">
+              {db.labels.map((l, i) => (
+                <button
+                  key={l.n}
+                  className="chip"
+                  style={{ borderColor: l.c }}
+                  onClick={() => chooseLabel(l.n)}
+                >
+                  {i < 9 ? i + 1 + " " : ""}
+                  {l.n}
+                </button>
+              ))}
+              <button
+                onClick={() => {
+                  setPending(null);
+                  getSelection()?.removeAllRanges();
+                }}
+              >
+                {L("Cancel")}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
       <div className="card tw">
         <table>

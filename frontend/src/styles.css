@@ -173,6 +173,24 @@ th {
 .chip.on {
   color: #fff !important;
 }
+.label-picker {
+  position: fixed;
+  z-index: 10;
+  display: grid;
+  gap: 6px;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  padding: 8px;
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  background: var(--card);
+  box-shadow: 0 4px 16px #0003;
+}
+.label-picker-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 #txt {
   font-size: 20px;
   line-height: 2.4;

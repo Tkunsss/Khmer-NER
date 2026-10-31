@@ -51,7 +51,8 @@ async function local(m, p, b) {
   const A = U.role === "admin",
     [, r, i] = p.split("/"),
     id = i && decodeURIComponent(i),
-    assignedTo = (d, username) => (d.assignees || (d.as ? [d.as] : [])).includes(username),
+    assignedTo = (d, username) =>
+      (d.assignees || (d.as ? [d.as] : [])).includes(username),
     rowLimited = (d, username) =>
       (d.rowAssignments || []).some(
         (assignment) => assignment.username === username,
@@ -94,8 +95,8 @@ async function local(m, p, b) {
       ),
     canAccessAnnotation = (d, a) =>
       A ||
-      (fullAccess(d, U.u) ||
-        rowAssignedTo(d, U.u, rowForOffset(d.text, a.s))),
+      fullAccess(d, U.u) ||
+      rowAssignedTo(d, U.u, rowForOffset(d.text, a.s)),
     D = () =>
       M.docs.find(
         (d) =>
@@ -103,8 +104,7 @@ async function local(m, p, b) {
           (A ||
             assignedTo(d, U.u) ||
             (d.rowAssignments || []).some((a) => a.username === U.u)),
-      ) ||
-      E("Document not found.");
+      ) || E("Document not found.");
   let out = { ok: 1 };
   if (r === "users") {
     if (!A) E("Admins only.");
@@ -190,7 +190,16 @@ async function local(m, p, b) {
         d.assignees = b.assignee ? [b.assignee] : [];
       }
       if (b.assignees !== undefined) {
-        if (!A || !Array.isArray(b.assignees) || b.assignees.some((u) => typeof u !== "string" || !M.users.some((z) => z.u === u && z.role === "annotator"))) E("Choose valid annotators.");
+        if (
+          !A ||
+          !Array.isArray(b.assignees) ||
+          b.assignees.some(
+            (u) =>
+              typeof u !== "string" ||
+              !M.users.some((z) => z.u === u && z.role === "annotator"),
+          )
+        )
+          E("Choose valid annotators.");
         if (
           b.assignees.length &&
           (d.rowAssignments || []).some(
@@ -216,24 +225,27 @@ async function local(m, p, b) {
           E("Choose an annotator and a valid row range.");
         if (
           (d.rowAssignments || []).some(
-            (a) =>
-              a.username !== username &&
-              a.start <= end &&
-              a.end >= start,
+            (a) => a.username !== username && a.start <= end && a.end >= start,
           ) ||
           (d.assignees || []).some((assignee) => assignee !== username)
         )
-          E("Some rows in this range are already assigned to another annotator.");
+          E(
+            "Some rows in this range are already assigned to another annotator.",
+          );
         d.rowAssignments = d.rowAssignments || [];
         if (
           d.rowAssignments.some(
             (a) =>
-              a.username === username &&
-              a.start === start &&
-              a.end === end,
+              a.username === username && a.start === start && a.end === end,
           )
         )
           E("This row range is already assigned.");
+        if (
+          d.rowAssignments.some(
+            (a) => a.username === username && a.start <= end && a.end >= start,
+          )
+        )
+          E("These rows overlap a range already assigned to this annotator.");
         d.rowAssignments.push({ username, start, end });
       }
       if (b.removeRowAssignment !== undefined) {
@@ -241,13 +253,12 @@ async function local(m, p, b) {
         const a = b.removeRowAssignment || {};
         d.rowAssignments = (d.rowAssignments || []).filter(
           (x) =>
-            x.username !== a.username ||
-            x.start !== a.start ||
-            x.end !== a.end,
+            x.username !== a.username || x.start !== a.start || x.end !== a.end,
         );
       }
       if (b.done !== undefined) {
-        if (!A && !fullAccess(d, U.u)) E("Only a document assignee can change document status.");
+        if (!A && !fullAccess(d, U.u))
+          E("Only a document assignee can change document status.");
         d.done = b.done;
         if (b.done) d.review = "";
       }
@@ -285,8 +296,7 @@ async function local(m, p, b) {
       if (!annotation) return;
       if (!canAccessAnnotation(d, annotation))
         E("This row is not assigned to you.");
-      if (m === "DELETE")
-        d.anns = d.anns.filter((a) => a.id !== id);
+      if (m === "DELETE") d.anns = d.anns.filter((a) => a.id !== id);
       else annotation.l = b.label;
     });
   } else if (r === "import") {

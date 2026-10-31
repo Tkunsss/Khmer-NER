@@ -28,10 +28,40 @@ export default function App() {
   const [tab, setTab] = useState("tasks"),
     [cur, setCur] = useState(null),
     [act, setAct] = useState(null),
-    [msg, setMsg] = useState(""),
     [weak, setWeak] = useState(false);
   const [qf, setQf] = useState(""),
     [snapOn, setSnapOn] = useState(true);
+  // Pop-up messages (toasts): always visible on screen, so nobody has to scroll up.
+  const [toasts, setToasts] = useState([]),
+    timers = useRef({});
+  const dismiss = (id) => setToasts((t) => t.filter((x) => x.id !== id));
+  // kind: "ok" (green) | "danger" (red: errors, deletes, removes) | "info" (blue)
+  const notify = (text, kind = "ok", key) => {
+    if (!text) return;
+    const id = key || String(Date.now() + Math.random());
+    setToasts((t) =>
+      [...t.filter((x) => x.id !== id), { id, text, kind }].slice(-4),
+    );
+    clearTimeout(timers.current[id]);
+    if (key !== "progress")
+      timers.current[id] = setTimeout(
+        () => dismiss(id),
+        kind === "danger" ? 6000 : 3500,
+      );
+  };
+  // Old string-based messages from Import/Export, Account, Users... become toasts too.
+  const setMsg = (m) => {
+    if (!m) return;
+    if (/^(Uploading|Finishing import)/.test(m))
+      return notify(m, "info", "progress");
+    dismiss("progress");
+    notify(
+      m,
+      /^(Imported|Password changed|Export copied|Export downloaded)/.test(m)
+        ? "ok"
+        : "danger",
+    );
+  };
   const L = (s) => (lang === "km" && KM[s]) || s,
     rl = (r) => (lang === "km" ? RL[r] : r);
   setSnap(snapOn);
@@ -61,14 +91,21 @@ export default function App() {
       else setMsg(e.message);
     }
   };
-  const run = async (f) => {
-    setMsg("");
+  // run(f) -> null on success, or the error message string on failure.
+  // Pass { quiet: true } when the caller shows the error itself (next to its button)
+  // so it does not also appear in the banner at the top of the page.
+  // opts.ok = message to show after success; opts.kind = "ok" | "danger" | "info".
+  const run = async (f, opts = {}) => {
+    let error = null;
     try {
       await f();
     } catch (e) {
-      setMsg(e.message);
+      error = e.message || "Request failed";
+      if (!opts.quiet) notify(error, "danger");
     }
     await load(me.role);
+    if (!error && opts.ok) notify(opts.ok, opts.kind || "ok");
+    return error;
   };
   useEffect(() => {
     api("GET", "/me")
@@ -87,7 +124,9 @@ export default function App() {
     db,
     run,
     load,
+    setDb,
     setMsg,
+    notify,
     tab,
     cur,
     setCur,
@@ -173,22 +212,31 @@ export default function App() {
             </button>
           ))}
         </div>
-        {msg && (
-          <p
-            className={
-              /^(Imported|Password changed|Export copied|Export downloaded)/.test(
-                msg,
-              )
-                ? ""
-                : "err"
-            }
-          >
-            {msg}
-          </p>
-        )}
         <V />
+        <Toasts toasts={toasts} dismiss={dismiss} />
       </div>
     </C.Provider>
+  );
+}
+
+function Toasts({ toasts, dismiss }) {
+  return (
+    <div className="toasts" aria-live="polite">
+      {toasts.map((t) => (
+        <div
+          key={t.id}
+          className={"toast " + t.kind}
+          role={t.kind === "danger" ? "alert" : "status"}
+          onClick={() => dismiss(t.id)}
+          title="Click to close"
+        >
+          <span className="toast-icon">
+            {t.kind === "danger" ? "✕" : t.kind === "info" ? "ℹ" : "✓"}
+          </span>
+          <span>{t.text}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -210,6 +258,9 @@ function Login({ onIn, lang, toggle }) {
       <div className="row">
         <input
           style={{ width: "100%" }}
+          id="login-username"
+          name="username"
+          autoComplete="username"
           placeholder={L("Username")}
           value={u}
           onChange={(x) => setU(x.target.value)}
@@ -218,6 +269,9 @@ function Login({ onIn, lang, toggle }) {
       <div className="row">
         <input
           style={{ width: "100%" }}
+          id="login-password"
+          name="password"
+          autoComplete="current-password"
           type="password"
           placeholder={L("Password")}
           value={p}
@@ -240,11 +294,17 @@ function Review({ d }) {
   const { L, run } = useContext(C),
     [n, setN] = useState("");
   const go = (r) =>
-    run(() => api("PATCH", "/docs/" + d.id, { review: r, note: n }));
+    run(() => api("PATCH", "/docs/" + d.id, { review: r, note: n }), {
+      ok:
+        (r === "approved" ? "Approved: " : "Returned to annotator: ") + d.title,
+      kind: r === "approved" ? "ok" : "info",
+    });
   return (
     <>
       <br />
       <input
+        id={"review-note-" + d.id}
+        name={"review-note-" + d.id}
         placeholder={L("Reviewer note")}
         value={n}
         onChange={(e) => setN(e.target.value)}
@@ -259,55 +319,286 @@ function Assignment({ d, annotators, L, run }) {
   const current = d.assignees || (d.as ? [d.as] : []);
   const [selected, setSelected] = useState(current);
   useEffect(() => setSelected(current), [d.assignees, d.as]);
-  const changed = selected.length !== current.length || selected.some((u) => !current.includes(u));
+  const changed =
+    selected.length !== current.length ||
+    selected.some((u) => !current.includes(u));
   const rows = documentLines(d.text).length,
     [username, setUsername] = useState(annotators[0]?.u || ""),
     [start, setStart] = useState("1"),
     [end, setEnd] = useState(String(rows));
+  // status: "idle" | "busy" | "ok" | "error"
+  const IDLE = { status: "idle", text: "", conflicts: [] };
+  const [saveState, setSaveState] = useState(IDLE),
+    [rowState, setRowState] = useState(IDLE);
+  // Any change to the form clears an old error, so a red button never lingers.
+  useEffect(
+    () => setSaveState((s) => (s.status === "error" ? IDLE : s)),
+    [selected.join(",")],
+  );
+  useEffect(
+    () => setRowState((s) => (s.status === "error" ? IDLE : s)),
+    [username, start, end],
+  );
+  const flash = (set, state) => {
+    set(state);
+    if (state.status === "ok")
+      setTimeout(() => set((s) => (s.status === "ok" ? IDLE : s)), 2500);
+  };
+
+  const saveAssignment = async () => {
+    setSaveState({ ...IDLE, status: "busy" });
+    const err = await run(
+      () => api("PATCH", "/docs/" + d.id, { assignees: selected }),
+      { quiet: true },
+    );
+    flash(
+      setSaveState,
+      err
+        ? { ...IDLE, status: "error", text: err }
+        : { ...IDLE, status: "ok", text: L("Assignment saved.") },
+    );
+  };
+
+  // Returns an error message (and the conflicting assignments) or null.
+  const checkRows = () => {
+    const s = +start,
+      e = +end;
+    if (!annotators.length || !username)
+      return { text: L("Choose an annotator.") };
+    if (
+      !Number.isInteger(s) ||
+      !Number.isInteger(e) ||
+      s < 1 ||
+      e < s ||
+      e > rows
+    )
+      return { text: `${L("Enter a valid row range between 1 and")} ${rows}.` };
+    const wholeDoc = d.assignees || (d.as ? [d.as] : []);
+    if (wholeDoc.includes(username))
+      return {
+        text: `${username} ${L("already has the whole document assigned.")}`,
+      };
+    const otherWhole = wholeDoc.filter((u) => u !== username);
+    if (otherWhole.length)
+      return {
+        text: `${L("The whole document is already assigned to")} ${otherWhole.join(", ")}.`,
+      };
+    const hits = (d.rowAssignments || []).filter(
+      (a) => a.start <= e && a.end >= s,
+    );
+    if (hits.length) {
+      const list = hits
+        .map((a) => `${a.username} ${a.start}–${a.end}`)
+        .join(", ");
+      const mine = hits.every((a) => a.username === username);
+      return {
+        text: `${L("Already assigned")}: ${list}. ${mine ? L("Remove the old range first, or choose rows that are not assigned yet.") : L("Those rows belong to another annotator.")}`,
+        conflicts: hits,
+      };
+    }
+    return null;
+  };
+
+  const assignRows = async () => {
+    const problem = checkRows();
+    if (problem)
+      return setRowState({
+        ...IDLE,
+        status: "error",
+        text: problem.text,
+        conflicts: problem.conflicts || [],
+      });
+    setRowState({ ...IDLE, status: "busy" });
+    const err = await run(
+      () =>
+        api("PATCH", "/docs/" + d.id, {
+          rowAssignment: { username, start: +start, end: +end },
+        }),
+      { quiet: true },
+    );
+    flash(
+      setRowState,
+      err
+        ? { ...IDLE, status: "error", text: err }
+        : {
+            ...IDLE,
+            status: "ok",
+            text: `${L("Rows assigned")}: ${username} ${start}–${end}`,
+          },
+    );
+  };
+
+  const isConflict = (a) =>
+    rowState.conflicts.some(
+      (c) =>
+        c.username === a.username && c.start === a.start && c.end === a.end,
+    );
+  const btnClass = (st) =>
+    "p" + (st.status === "error" ? " bad" : st.status === "ok" ? " good" : "");
+
   return (
     <div className="assignment">
       <details>
-        <summary>{current.length ? `${L("Assigned to")}: ${current.join(", ")}` : L("Unassigned")}</summary>
+        <summary>
+          {current.length
+            ? `${L("Assigned to")}: ${current.join(", ")}`
+            : L("Unassigned")}
+        </summary>
         <div className="assignment-options">
           {annotators.map((u) => (
             <label key={u.u}>
-              <input type="checkbox" checked={selected.includes(u.u)} onChange={(e) => setSelected((old) => e.target.checked ? [...old, u.u] : old.filter((x) => x !== u.u))} />
+              <input
+                type="checkbox"
+                id={`assign-${d.id}-${encodeURIComponent(u.u)}`}
+                name={`assignee-${d.id}`}
+                checked={selected.includes(u.u)}
+                onChange={(e) =>
+                  setSelected((old) =>
+                    e.target.checked
+                      ? [...old, u.u]
+                      : old.filter((x) => x !== u.u),
+                  )
+                }
+              />
               {u.u}
             </label>
           ))}
-          <button className="p" disabled={!changed} onClick={() => run(() => api("PATCH", "/docs/" + d.id, { assignees: selected }))}>{L("Save assignment")}</button>
+          <button
+            className={btnClass(saveState)}
+            disabled={
+              (!changed && saveState.status === "idle") ||
+              saveState.status === "busy"
+            }
+            onClick={saveAssignment}
+          >
+            {saveState.status === "busy"
+              ? L("Saving…")
+              : saveState.status === "ok"
+                ? "✓ " + L("Saved")
+                : L("Save assignment")}
+          </button>
+          {saveState.text && (
+            <p
+              className={
+                "assign-msg " + (saveState.status === "error" ? "bad" : "good")
+              }
+              role={saveState.status === "error" ? "alert" : "status"}
+            >
+              {saveState.text}
+            </p>
+          )}
         </div>
       </details>
       <details>
-        <summary>{L("Assign row range")} ({rows})</summary>
+        <summary>
+          {L("Assign row range")} ({rows})
+        </summary>
         <div className="assignment-options">
+          <div className="panel-title" title={d.title}>
+            {d.title}
+          </div>
           <label>
             {L("Annotator")}
-            <select value={username} onChange={(e) => setUsername(e.target.value)}>
-              {annotators.map((u) => <option key={u.u} value={u.u}>{u.u}</option>)}
+            <select
+              id={`row-annotator-${d.id}`}
+              name={`row-annotator-${d.id}`}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+            >
+              {annotators.map((u) => (
+                <option key={u.u} value={u.u}>
+                  {u.u}
+                </option>
+              ))}
             </select>
           </label>
           <label>
             {L("From row")}
-            <input type="number" min="1" max={rows} value={start} onChange={(e) => setStart(e.target.value)} />
+            <input
+              type="number"
+              id={`row-from-${d.id}`}
+              name={`row-from-${d.id}`}
+              min="1"
+              max={rows}
+              value={start}
+              onChange={(e) => setStart(e.target.value)}
+            />
           </label>
           <label>
             {L("To row")}
-            <input type="number" min="1" max={rows} value={end} onChange={(e) => setEnd(e.target.value)} />
+            <input
+              type="number"
+              id={`row-to-${d.id}`}
+              name={`row-to-${d.id}`}
+              min="1"
+              max={rows}
+              value={end}
+              onChange={(e) => setEnd(e.target.value)}
+            />
           </label>
           <button
-            className="p"
-            disabled={!annotators.length || !Number.isInteger(+start) || !Number.isInteger(+end) || +start < 1 || +end < +start || +end > rows}
-            onClick={() => run(() => api("PATCH", "/docs/" + d.id, { rowAssignment: { username, start: +start, end: +end } }))}
+            className={btnClass(rowState)}
+            disabled={!annotators.length || rowState.status === "busy"}
+            onClick={assignRows}
           >
-            {L("Assign rows")}
+            {rowState.status === "busy"
+              ? L("Assigning…")
+              : rowState.status === "ok"
+                ? "✓ " + L("Assigned")
+                : L("Assign rows")}
           </button>
-          {(d.rowAssignments || []).map((assignment) => (
-            <div className="row-assignment" key={`${assignment.username}-${assignment.start}-${assignment.end}`}>
-              <span>{assignment.username}: {assignment.start}–{assignment.end}</span>
-              <button onClick={() => run(() => api("PATCH", "/docs/" + d.id, { removeRowAssignment: assignment }))}>{L("Remove")}</button>
+          {rowState.text && (
+            <p
+              className={
+                "assign-msg " + (rowState.status === "error" ? "bad" : "good")
+              }
+              role={rowState.status === "error" ? "alert" : "status"}
+            >
+              {rowState.text}
+            </p>
+          )}
+          {(d.rowAssignments || []).length > 0 && (
+            <div className="scroll-list row-list">
+              <div className="list-head">
+                {d.title} · {L("Assigned ranges")} ({d.rowAssignments.length})
+              </div>
+              {[...d.rowAssignments]
+                .sort(
+                  (x, y) =>
+                    x.start - y.start || x.username.localeCompare(y.username),
+                )
+                .map((assignment, i) => (
+                  <div
+                    className={
+                      "row-assignment" +
+                      (isConflict(assignment) ? " conflict" : "")
+                    }
+                    key={`${assignment.username}-${assignment.start}-${assignment.end}-${i}`}
+                  >
+                    <span>
+                      {assignment.username}: {assignment.start}–{assignment.end}
+                    </span>
+                    <button
+                      className="danger"
+                      onClick={() =>
+                        run(
+                          () =>
+                            api("PATCH", "/docs/" + d.id, {
+                              removeRowAssignment: assignment,
+                            }),
+                          {
+                            ok: `Removed rows ${assignment.start}–${assignment.end} from ${assignment.username}`,
+                            kind: "danger",
+                          },
+                        )
+                      }
+                    >
+                      {L("Remove")}
+                    </button>
+                  </div>
+                ))}
             </div>
-          ))}
+          )}
         </div>
       </details>
     </div>
@@ -350,7 +641,7 @@ function assignedRows(d, username) {
 }
 
 function Tasks() {
-  const { L, me, db, run, qf, setQf, setCur, setTab } = useContext(C),
+  const { L, me, db, run, notify, qf, setQf, setCur, setTab } = useContext(C),
     A = me.role === "admin",
     an = db.users.filter((u) => u.role === "annotator"),
     ds = db.docs.filter((d) => !qf || (d.title + d.text).includes(qf)),
@@ -378,21 +669,30 @@ function Tasks() {
               </thead>
               <tbody>
                 {an.map((u) => {
-                  const d = db.docs.filter((x) => x.assignees?.includes(u.u) || x.as === u.u || x.rowAssignments?.some((assignment) => assignment.username === u.u));
+                  const d = db.docs.filter(
+                    (x) =>
+                      x.assignees?.includes(u.u) ||
+                      x.as === u.u ||
+                      x.rowAssignments?.some(
+                        (assignment) => assignment.username === u.u,
+                      ),
+                  );
                   return (
                     <tr key={u.u}>
                       <td>{u.u}</td>
                       <td>
-                        {d.map((doc) => (
-                          <div className="assigned-range" key={doc.id}>
-                            <b>{doc.title}</b>
-                            {assignedRows(doc, u.u).map((range) => (
-                              <div key={`${range.start}-${range.end}`}>
-                                {L("Rows")} {range.start}–{range.end}
-                              </div>
-                            ))}
-                          </div>
-                        ))}
+                        <div className="scroll-list">
+                          {d.map((doc) => (
+                            <div className="assigned-range" key={doc.id}>
+                              <b>{doc.title}</b>
+                              {assignedRows(doc, u.u).map((range) => (
+                                <div key={`${range.start}-${range.end}`}>
+                                  {L("Rows")} {range.start}–{range.end}
+                                </div>
+                              ))}
+                            </div>
+                          ))}
+                        </div>
                       </td>
                       <td>
                         {d.filter((x) => x.done).length}/{d.length}
@@ -431,16 +731,18 @@ function Tasks() {
               <tbody>
                 <tr>
                   <td>
-                    {myDocs.map((doc) => (
-                      <div className="assigned-range" key={doc.id}>
-                        <b>{doc.title}</b>
-                        {assignedRows(doc, me.u).map((range) => (
-                          <div key={`${range.start}-${range.end}`}>
-                            {L("Rows")} {range.start}–{range.end}
-                          </div>
-                        ))}
-                      </div>
-                    ))}
+                    <div className="scroll-list">
+                      {myDocs.map((doc) => (
+                        <div className="assigned-range" key={doc.id}>
+                          <b>{doc.title}</b>
+                          {assignedRows(doc, me.u).map((range) => (
+                            <div key={`${range.start}-${range.end}`}>
+                              {L("Rows")} {range.start}–{range.end}
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
                   </td>
                   <td>{myDocs.filter((d) => d.done).length}</td>
                   <td>{myDocs.filter((d) => !d.done).length}</td>
@@ -453,7 +755,8 @@ function Tasks() {
                   <td>
                     {myDocs.length
                       ? Math.round(
-                          (myDocs.filter((d) => d.done).length / myDocs.length) *
+                          (myDocs.filter((d) => d.done).length /
+                            myDocs.length) *
                             100,
                         )
                       : 0}
@@ -468,6 +771,8 @@ function Tasks() {
       <h3>{L(A ? "Documents" : "My documents")}</h3>
       <div className="row">
         <input
+          id="doc-search"
+          name="search"
           placeholder={L("Search")}
           value={qf}
           onChange={(e) => setQf(e.target.value)}
@@ -488,9 +793,7 @@ function Tasks() {
               <tr key={d.id}>
                 <td>{d.title}</td>
                 <td>
-                  {A && (
-                    <Assignment d={d} annotators={an} L={L} run={run} />
-                  )}
+                  {A && <Assignment d={d} annotators={an} L={L} run={run} />}
                   {stt(d, L)}
                   {d.review === "returned" && d.note && (
                     <>
@@ -502,21 +805,27 @@ function Tasks() {
                 <td>{d.anns.length}</td>
                 <td>
                   <button
+                    className="open"
                     onClick={() => {
                       setCur(d.id);
                       setTab("annotate");
+                      notify(`Opened: ${d.title}`, "info");
                     }}
                   >
                     {L("Open")}
                   </button>
                   <button
+                    className="danger"
                     onClick={() => {
                       if (
                         window.confirm(
                           "Delete this document and all its annotations? This cannot be undone.",
                         )
                       )
-                        run(() => api("DELETE", "/docs/" + d.id));
+                        run(() => api("DELETE", "/docs/" + d.id), {
+                          ok: `Deleted document: ${d.title}`,
+                          kind: "danger",
+                        });
                     }}
                   >
                     {L("Delete")}
@@ -540,42 +849,70 @@ function Tasks() {
 }
 
 function Annotate() {
-  const { L, me, db, run, cur, act, setAct, snapOn, setSnapOn } = useContext(C),
+  const {
+      L,
+      me,
+      db,
+      run,
+      load,
+      setDb,
+      notify,
+      cur,
+      act,
+      setAct,
+      snapOn,
+      setSnapOn,
+    } = useContext(C),
     box = useRef(null),
     [lineIndex, setLineIndex] = useState(0),
     [lineInput, setLineInput] = useState("1"),
     [pending, setPending] = useState(null),
     d = db.docs.find((x) => x.id === cur);
   useEffect(() => {
-    setLineIndex(0);
-    setLineInput("1");
+    // Annotators start on the first row that was assigned to them.
+    const mine = (d?.rowAssignments || []).filter((x) => x.username === me.u);
+    const first =
+      me.role !== "admin" && mine.length
+        ? Math.min(...mine.map((x) => x.start))
+        : 1;
+    setLineIndex(first - 1);
+    setLineInput(String(first));
     setPending(null);
   }, [cur]);
   const undo = () => {
     if (!d) return;
     const m = d.anns.filter((n) => n.by === me.u);
     if (m.length)
-      run(() =>
-        api(
-          "DELETE",
-          "/anns/" + m.reduce((a, b) => (+b.id > +a.id ? b : a)).id,
-        ),
+      run(
+        () =>
+          api(
+            "DELETE",
+            "/anns/" + m.reduce((a, b) => (+b.id > +a.id ? b : a)).id,
+          ),
+        { ok: "Undo: last entity removed", kind: "danger" },
       );
+    else notify("Nothing to undo.", "info");
   };
   const chooseLabel = (label) => {
     if (!pending) {
       setAct(label);
       return;
     }
-    run(async () => {
-      await api("POST", "/docs/" + d.id + "/anns", {
-        start: pending.start,
-        end: pending.end,
-        label,
-      });
-      setPending(null);
-      getSelection()?.removeAllRanges();
-    });
+    // Show the new entity at once; save in the background, then sync with the server.
+    const { start, end } = pending,
+      docId = d.id,
+      temp = { id: "tmp-" + Date.now(), s: start, e: end, l: label, by: me.u };
+    setPending(null);
+    getSelection()?.removeAllRanges();
+    setDb((old) => ({
+      ...old,
+      docs: old.docs.map((x) =>
+        x.id === docId ? { ...x, anns: [...x.anns, temp] } : x,
+      ),
+    }));
+    api("POST", "/docs/" + docId + "/anns", { start, end, label })
+      .catch((e) => notify(e.message || "Could not save the entity.", "danger"))
+      .finally(() => load(me.role));
   };
   useEffect(() => {
     const k = (e) => {
@@ -620,6 +957,34 @@ function Annotate() {
       me.role === "admin" || fullDocumentAssigned || !myRowAssignments.length
         ? lines.length
         : Math.max(...myRowAssignments.map((assignment) => assignment.end));
+  const goRow = (row) => {
+    setPending(null);
+    setLineIndex(row - 1);
+    setLineInput(String(row));
+  };
+  // Next / previous row the person may work on (skips rows assigned to others).
+  const unrestricted =
+    me.role === "admin" || fullDocumentAssigned || !myRowAssignments.length;
+  const stepRow = (from, dir) => {
+    const target = from + dir;
+    if (unrestricted)
+      return target >= 1 && target <= lines.length ? target : null;
+    if (rowAssigned(target)) return target;
+    if (dir > 0) {
+      const c = myRowAssignments
+        .filter((r) => r.start > from)
+        .map((r) => r.start);
+      return c.length ? Math.min(...c) : null;
+    }
+    const c = myRowAssignments.filter((r) => r.end < from).map((r) => r.end);
+    return c.length ? Math.max(...c) : null;
+  };
+  const myRanges = (
+    me.role === "admin"
+      ? [{ start: 1, end: lines.length }]
+      : assignedRows(d, me.u)
+  ).sort((x, y) => x.start - y.start);
+  const myRowCount = myRanges.reduce((n, r) => n + (r.end - r.start + 1), 0);
   const sel = () =>
     setTimeout(() => {
       const s = getSelection();
@@ -632,7 +997,11 @@ function Annotate() {
       const t = d.text;
       let st = +A.dataset.o + r.startOffset,
         en = +B.dataset.o + r.endOffset;
-      if (!rowAssigned(rowForOffset(t, st)) || rowForOffset(t, en - 1) !== rowForOffset(t, st)) return;
+      if (
+        !rowAssigned(rowForOffset(t, st)) ||
+        rowForOffset(t, en - 1) !== rowForOffset(t, st)
+      )
+        return;
       while (st < en && /\s/.test(t[st])) st++;
       while (en > st && /\s/.test(t[en - 1])) en--;
       [st, en] = snap(t, st, en);
@@ -650,28 +1019,30 @@ function Annotate() {
     currentLine = lines[currentLineIndex],
     parts = [];
   let o = currentLine.start;
-  a.filter((n) => n.e > currentLine.start && n.s < currentLine.end).forEach((n) => {
-    const start = Math.max(n.s, currentLine.start),
-      end = Math.min(n.e, currentLine.end);
-    if (start > o)
+  a.filter((n) => n.e > currentLine.start && n.s < currentLine.end).forEach(
+    (n) => {
+      const start = Math.max(n.s, currentLine.start),
+        end = Math.min(n.e, currentLine.end);
+      if (start > o)
+        parts.push(
+          <span key={"t" + o} data-o={o}>
+            {d.text.slice(o, start)}
+          </span>,
+        );
+      const c = col(n.l);
       parts.push(
-        <span key={"t" + o} data-o={o}>
-          {d.text.slice(o, start)}
-        </span>,
+        <mark
+          key={n.id}
+          data-o={start}
+          style={{ background: c + "33", borderBottom: "3px solid " + c }}
+        >
+          {d.text.slice(start, end)}
+          <sup>{n.l}</sup>
+        </mark>,
       );
-    const c = col(n.l);
-    parts.push(
-      <mark
-        key={n.id}
-        data-o={start}
-        style={{ background: c + "33", borderBottom: "3px solid " + c }}
-      >
-        {d.text.slice(start, end)}
-        <sup>{n.l}</sup>
-      </mark>,
-    );
-    o = end;
-  });
+      o = end;
+    },
+  );
   if (o < currentLine.end)
     parts.push(
       <span key="end" data-o={o}>
@@ -686,7 +1057,9 @@ function Annotate() {
           <button
             disabled={me.role !== "admin" && !fullDocumentAssigned}
             onClick={() =>
-              run(() => api("PATCH", "/docs/" + d.id, { done: !d.done }))
+              run(() => api("PATCH", "/docs/" + d.id, { done: !d.done }), {
+                ok: d.done ? "Marked as in progress" : "Marked as done",
+              })
             }
           >
             {d.done ? L("Mark as in progress") : L("Mark as done")}
@@ -694,6 +1067,8 @@ function Annotate() {
           <button onClick={undo}>{L("Undo")}</button>
           <label>
             <input
+              id="snap-to-words"
+              name="snap-to-words"
               type="checkbox"
               checked={snapOn}
               onChange={(e) => setSnapOn(e.target.checked)}
@@ -702,34 +1077,68 @@ function Annotate() {
           </label>
         </div>
         {d.review === "returned" && d.note && <p className="err">{d.note}</p>}
-        {!pending && <div className="row">
-          {db.labels.map((l, i) => (
+        {!pending && (
+          <div className="row">
+            {db.labels.map((l, i) => (
+              <button
+                key={l.n}
+                className={"chip" + (cl === l.n ? " on" : "")}
+                style={{
+                  borderColor: l.c,
+                  ...(cl === l.n ? { background: l.c } : {}),
+                }}
+                onClick={() => chooseLabel(l.n)}
+              >
+                {i < 9 ? i + 1 + " " : ""}
+                {l.n}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="assign-banner">
+          <b>
+            {me.role === "admin" ? L("All rows") : L("Your assigned rows")}:
+          </b>
+          {myRanges.map((r) => (
             <button
-              key={l.n}
-              className={"chip" + (cl === l.n ? " on" : "")}
-              style={{
-                borderColor: l.c,
-                ...(cl === l.n ? { background: l.c } : {}),
-              }}
-              onClick={() => chooseLabel(l.n)}
+              key={`${r.start}-${r.end}`}
+              className={
+                "range-chip" +
+                (currentLineIndex + 1 >= r.start &&
+                currentLineIndex + 1 <= r.end
+                  ? " on"
+                  : "")
+              }
+              title={L("Go to row") + " " + r.start}
+              onClick={() => goRow(r.start)}
             >
-              {i < 9 ? i + 1 + " " : ""}
-              {l.n}
+              {L("Rows")} {r.start}–{r.end}
             </button>
           ))}
-        </div>}
+          <span className="mut">
+            ({myRowCount} {L("rows")})
+          </span>
+          <span
+            className={
+              "row-badge " +
+              (rowAssigned(currentLineIndex + 1) ? "good" : "bad")
+            }
+          >
+            {L("Row")} {currentLineIndex + 1}:{" "}
+            {rowAssigned(currentLineIndex + 1)
+              ? L("assigned to you")
+              : L("not assigned to you")}
+          </span>
+        </div>
         <p className="mut" style={{ margin: "4px 0" }}>
-          {L("Select text to tag it with the chosen label. Keys 1-9 pick a label.")}
+          {L(
+            "Select text to tag it with the chosen label. Keys 1-9 pick a label.",
+          )}
         </p>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <button
-            disabled={currentLineIndex === 0}
-            onClick={() => {
-              const nextIndex = currentLineIndex - 1;
-              setPending(null);
-              setLineIndex(nextIndex);
-              setLineInput(String(nextIndex + 1));
-            }}
+            disabled={stepRow(currentLineIndex + 1, -1) === null}
+            onClick={() => goRow(stepRow(currentLineIndex + 1, -1))}
           >
             {L("Previous")}
           </button>
@@ -748,6 +1157,7 @@ function Annotate() {
             <label htmlFor="row-number">{L("Row")}</label>
             <input
               id="row-number"
+              name="row-number"
               type="number"
               min="1"
               max={rowLimit}
@@ -769,18 +1179,19 @@ function Annotate() {
             </button>
           </form>
           <button
-            disabled={currentLineIndex >= rowLimit - 1}
-            onClick={() => {
-              const nextIndex = currentLineIndex + 1;
-              setPending(null);
-              setLineIndex(nextIndex);
-              setLineInput(String(nextIndex + 1));
-            }}
+            disabled={stepRow(currentLineIndex + 1, 1) === null}
+            onClick={() => goRow(stepRow(currentLineIndex + 1, 1))}
           >
             {L("Next")}
           </button>
         </div>
-        <div id="txt" ref={box} onMouseUp={sel} onTouchEnd={sel} className={rowAssigned(currentLineIndex + 1) ? "" : "unassigned-row"}>
+        <div
+          id="txt"
+          ref={box}
+          onMouseUp={sel}
+          onTouchEnd={sel}
+          className={rowAssigned(currentLineIndex + 1) ? "" : "unassigned-row"}
+        >
           {rowAssigned(currentLineIndex + 1)
             ? parts
             : L("This row is not assigned to you.")}
@@ -833,14 +1244,15 @@ function Annotate() {
                 <td>{d.text.slice(n.s, n.e)}</td>
                 <td>
                   <select
+                    id={"ann-label-" + n.id}
+                    name={"ann-label-" + n.id}
                     value={n.l}
-                    onChange={(e) =>
-                      run(() =>
-                        api("PATCH", "/anns/" + n.id, {
-                          label: e.target.value,
-                        }),
-                      )
-                    }
+                    onChange={(e) => {
+                      const label = e.target.value;
+                      run(() => api("PATCH", "/anns/" + n.id, { label }), {
+                        ok: `Label changed to ${label}`,
+                      });
+                    }}
                   >
                     {db.labels.map((l) => (
                       <option key={l.n}>{l.n}</option>
@@ -852,7 +1264,13 @@ function Annotate() {
                 </td>
                 <td>
                   <button
-                    onClick={() => run(() => api("DELETE", "/anns/" + n.id))}
+                    className="danger"
+                    onClick={() =>
+                      run(() => api("DELETE", "/anns/" + n.id), {
+                        ok: `Entity removed: "${d.text.slice(n.s, n.e)}"`,
+                        kind: "danger",
+                      })
+                    }
                   >
                     {L("Remove")}
                   </button>
@@ -883,7 +1301,10 @@ function Data() {
   db.docs.forEach((d) =>
     d.anns.forEach((n) => {
       const owner = n.by || d.as || "";
-      if ((A && annotator !== "all" && owner !== annotator) || (!A && owner !== me.u))
+      if (
+        (A && annotator !== "all" && owner !== annotator) ||
+        (!A && owner !== me.u)
+      )
         return;
       rows.push([d, n]);
       cnt[n.l] = (cnt[n.l] || 0) + 1;
@@ -897,11 +1318,23 @@ function Data() {
         {A && (
           <div className="row" style={{ marginBottom: 8 }}>
             <label>{L("Annotator")}</label>
-            <select value={annotator} onChange={(e) => { setAnnotator(e.target.value); setRowIndex(0); }}>
+            <select
+              id="data-annotator"
+              name="data-annotator"
+              value={annotator}
+              onChange={(e) => {
+                setAnnotator(e.target.value);
+                setRowIndex(0);
+              }}
+            >
               <option value="all">{L("All annotators")}</option>
-              {db.users.filter((u) => u.role === "annotator").map((u) => (
-                <option key={u.u} value={u.u}>{u.u}</option>
-              ))}
+              {db.users
+                .filter((u) => u.role === "annotator")
+                .map((u) => (
+                  <option key={u.u} value={u.u}>
+                    {u.u}
+                  </option>
+                ))}
             </select>
           </div>
         )}
@@ -916,9 +1349,21 @@ function Data() {
       </div>
       <div className="card tw">
         <div className="row" style={{ justifyContent: "space-between" }}>
-          <button disabled={!rows.length || currentIndex === 0} onClick={() => setRowIndex(currentIndex - 1)}>{L("Previous")}</button>
-          <span className="mut">{rows.length ? `${currentIndex + 1} / ${rows.length}` : "0 / 0"}</span>
-          <button disabled={!rows.length || currentIndex >= rows.length - 1} onClick={() => setRowIndex(currentIndex + 1)}>{L("Next")}</button>
+          <button
+            disabled={!rows.length || currentIndex === 0}
+            onClick={() => setRowIndex(currentIndex - 1)}
+          >
+            {L("Previous")}
+          </button>
+          <span className="mut">
+            {rows.length ? `${currentIndex + 1} / ${rows.length}` : "0 / 0"}
+          </span>
+          <button
+            disabled={!rows.length || currentIndex >= rows.length - 1}
+            onClick={() => setRowIndex(currentIndex + 1)}
+          >
+            {L("Next")}
+          </button>
         </div>
         <table>
           <thead>
@@ -957,7 +1402,7 @@ function Data() {
 }
 
 function Labels() {
-  const { L, db, run } = useContext(C),
+  const { L, db, run, notify } = useContext(C),
     [n, setN] = useState(""),
     [c, setC] = useState("#f59e0b");
   return (
@@ -965,11 +1410,15 @@ function Labels() {
       <div className="row">
         <input
           style={{ width: 200 }}
+          id="label-name"
+          name="label-name"
           placeholder={L("Label name")}
           value={n}
           onChange={(e) => setN(e.target.value)}
         />
         <input
+          id="label-color"
+          name="label-color"
           type="color"
           value={c}
           onChange={(e) => setC(e.target.value)}
@@ -977,12 +1426,26 @@ function Labels() {
         />
         <button
           className="p"
-          onClick={() => {
+          onClick={async () => {
             const v = n.trim().toUpperCase();
-            if (v) {
-              run(() => api("POST", "/labels", { n: v, c }));
-              setN("");
-            }
+            if (!v) return notify("Enter a label name.", "danger");
+            if (db.labels.some((l) => l.n.toUpperCase() === v))
+              return notify(
+                `Label "${v}" already exists. (409 Conflict)`,
+                "danger",
+              );
+            const err = await run(() => api("POST", "/labels", { n: v, c }), {
+              ok: `Label added: ${v}`,
+              quiet: true,
+            });
+            if (err)
+              notify(
+                /exist|conflict|409/i.test(err)
+                  ? `Label "${v}" already exists. (409 Conflict)`
+                  : err,
+                "danger",
+              );
+            else setN("");
           }}
         >
           {L("Add label")}
@@ -993,9 +1456,14 @@ function Labels() {
           <span key={l.n} className="chip" style={{ borderColor: l.c }}>
             {l.n}{" "}
             <button
+              className="danger"
               style={{ padding: "0 6px" }}
+              title={L("Delete")}
               onClick={() =>
-                run(() => api("DELETE", "/labels/" + encodeURIComponent(l.n)))
+                run(() => api("DELETE", "/labels/" + encodeURIComponent(l.n)), {
+                  ok: `Deleted label: ${l.n}`,
+                  kind: "danger",
+                })
               }
             >
               ✕
@@ -1008,42 +1476,96 @@ function Labels() {
 }
 
 function Users() {
-  const { L, rl, me, db, run, setMsg } = useContext(C),
+  const { L, rl, me, db, run, notify, setMsg } = useContext(C),
     [u, setU] = useState(""),
     [p, setP] = useState(""),
-    [r, setR] = useState("annotator");
-  const add = () => {
-    if (!u.trim() || !p) {
-      setMsg("Enter a username and a password.");
-      return;
+    [r, setR] = useState("annotator"),
+    [fb, setFb] = useState(null); // { kind: "ok" | "bad" | "busy", text }
+  // An error message goes away when the form is edited; a success message after a few seconds.
+  useEffect(() => setFb((f) => (f && f.kind === "bad" ? null : f)), [u, p, r]);
+  const add = async () => {
+    // The result is shown twice: right under the form (always in view) and as a pop-up.
+    const say = (text, kind) => {
+      setFb({ kind, text });
+      notify(text, kind === "ok" ? "ok" : "danger");
+      if (kind === "ok")
+        setTimeout(() => setFb((f) => (f && f.kind === "ok" ? null : f)), 5000);
+    };
+    const name = u.trim();
+    if (!name || !p) return say("Enter a username and a password.", "bad");
+    if (db.users.some((x) => x.u.toLowerCase() === name.toLowerCase()))
+      return say(`User "${name}" already exists.`, "bad");
+    setFb({ kind: "busy", text: "" });
+    const err = await run(
+      () => api("POST", "/users", { u: name, p, role: r }),
+      { quiet: true },
+    );
+    if (err)
+      say(
+        /exist|taken|duplicate|conflict|409/i.test(err)
+          ? `User "${name}" already exists.`
+          : err,
+        "bad",
+      );
+    else {
+      say(`User created: ${name}`, "ok");
+      setU("");
+      setP("");
     }
-    run(() => api("POST", "/users", { u: u.trim(), p, role: r }));
-    setU("");
-    setP("");
   };
   return (
     <>
       <div className="card">
         <div className="row">
           <input
+            id="new-username"
+            name="new-username"
+            autoComplete="off"
             placeholder={L("Username")}
             value={u}
             onChange={(e) => setU(e.target.value)}
           />
           <input
+            id="new-user-password"
+            name="new-user-password"
+            autoComplete="new-password"
             type="password"
             placeholder={L("Password")}
             value={p}
             onChange={(e) => setP(e.target.value)}
           />
-          <select value={r} onChange={(e) => setR(e.target.value)}>
+          <select
+            id="new-user-role"
+            name="new-user-role"
+            value={r}
+            onChange={(e) => setR(e.target.value)}
+          >
             <option value="annotator">{rl("annotator")}</option>
             <option value="admin">{rl("admin")}</option>
           </select>
-          <button className="p" onClick={add}>
-            {L("Create user")}
+          <button
+            className={
+              "p" +
+              (fb?.kind === "bad" ? " bad" : fb?.kind === "ok" ? " good" : "")
+            }
+            disabled={fb?.kind === "busy"}
+            onClick={add}
+          >
+            {fb?.kind === "busy"
+              ? L("Creating…")
+              : fb?.kind === "ok"
+                ? "✓ " + L("User created")
+                : L("Create user")}
           </button>
         </div>
+        {fb?.text && (
+          <p
+            className={"assign-msg " + (fb.kind === "ok" ? "good" : "bad")}
+            role={fb.kind === "ok" ? "status" : "alert"}
+          >
+            {fb.text}
+          </p>
+        )}
       </div>
       <div className="card tw">
         <table>
@@ -1062,9 +1584,12 @@ function Users() {
                 <td>
                   {x.u !== me.u && (
                     <button
+                      className="danger"
                       onClick={() =>
-                        run(() =>
-                          api("DELETE", "/users/" + encodeURIComponent(x.u)),
+                        run(
+                          () =>
+                            api("DELETE", "/users/" + encodeURIComponent(x.u)),
+                          { ok: `Deleted user: ${x.u}`, kind: "danger" },
                         )
                       }
                     >
@@ -1120,8 +1645,14 @@ function exportText(db, annotator = "all") {
   for (const d of db.docs) {
     const ranges = sentenceRanges(d.text);
     const annotations = d.anns
-      .filter((a) => annotator === "all" || (a.by || "") === annotator || (!a.by && (d.assignees || []).includes(annotator)))
-      .slice().sort((a, b) => a.s - b.s);
+      .filter(
+        (a) =>
+          annotator === "all" ||
+          (a.by || "") === annotator ||
+          (!a.by && (d.assignees || []).includes(annotator)),
+      )
+      .slice()
+      .sort((a, b) => a.s - b.s);
     for (const annotation of annotations) {
       const index = ranges.findIndex(
         ({ start, end }) => annotation.s >= start && annotation.s < end,
@@ -1164,8 +1695,20 @@ function IO() {
     [exportAnnotator, setExportAnnotator] = useState("all"),
     [importing, setImporting] = useState(false),
     annotators = db.users.filter((u) => u.role === "annotator"),
-    exportDocs = db.docs.filter((d) => me.role !== "admin" || exportAnnotator === "all" || d.assignees?.includes(exportAnnotator) || d.as === exportAnnotator || d.rowAssignments?.some((assignment) => assignment.username === exportAnnotator)),
-    txt = exportText({ ...db, docs: exportDocs }, me.role === "admin" ? exportAnnotator : "all"),
+    exportDocs = db.docs.filter(
+      (d) =>
+        me.role !== "admin" ||
+        exportAnnotator === "all" ||
+        d.assignees?.includes(exportAnnotator) ||
+        d.as === exportAnnotator ||
+        d.rowAssignments?.some(
+          (assignment) => assignment.username === exportAnnotator,
+        ),
+    ),
+    txt = exportText(
+      { ...db, docs: exportDocs },
+      me.role === "admin" ? exportAnnotator : "all",
+    ),
     annotationCount = exportDocs.reduce((total, d) => total + d.anns.length, 0);
   const imp = async (raw, name) => {
     if (!raw.trim()) {
@@ -1235,13 +1778,21 @@ function IO() {
             bytes = await f.slice(offset, end).arrayBuffer(),
             chunk = decoder.decode(bytes, { stream: end < f.size });
           if (chunk)
-            await api("POST", "/import/chunk", { uploadId, index: index++, chunk });
+            await api("POST", "/import/chunk", {
+              uploadId,
+              index: index++,
+              chunk,
+            });
           if (index % 8 === 0)
             setMsg(`Uploading ${f.name}: ${Math.round((end / f.size) * 100)}%`);
         }
         const rest = decoder.decode();
         if (rest)
-          await api("POST", "/import/chunk", { uploadId, index: index++, chunk: rest });
+          await api("POST", "/import/chunk", {
+            uploadId,
+            index: index++,
+            chunk: rest,
+          });
         setMsg(`Finishing import: ${f.name}`);
         const r = await api("POST", "/import/finish", {
           uploadId,
@@ -1309,6 +1860,8 @@ function IO() {
         <h3 style={{ marginTop: 0 }}>{L("Import")}</h3>
         <div className="row">
           <input
+            id="import-files"
+            name="import-files"
             ref={fileInput}
             type="file"
             multiple
@@ -1317,15 +1870,23 @@ function IO() {
           />
         </div>
         {selectedFiles.length > 0 && (
-          <p className="mut">{selectedFiles.map((file) => file.name).join(", ")}</p>
+          <p className="mut">
+            {selectedFiles.map((file) => file.name).join(", ")}
+          </p>
         )}
         <textarea
+          id="import-text"
+          name="import-text"
           placeholder={L("Write or paste text here")}
           value={ta}
           onChange={(e) => setTa(e.target.value)}
         />
         <div className="row" style={{ marginTop: 6 }}>
-          <button className="p" disabled={importing || (!ta.trim() && !selectedFiles.length)} onClick={doImport}>
+          <button
+            className="p"
+            disabled={importing || (!ta.trim() && !selectedFiles.length)}
+            onClick={doImport}
+          >
             {L("Import")}
           </button>
         </div>
@@ -1335,9 +1896,18 @@ function IO() {
         {me.role === "admin" && (
           <div className="row" style={{ marginBottom: 8 }}>
             <label>{L("Annotator")}</label>
-            <select value={exportAnnotator} onChange={(e) => setExportAnnotator(e.target.value)}>
+            <select
+              id="export-annotator"
+              name="export-annotator"
+              value={exportAnnotator}
+              onChange={(e) => setExportAnnotator(e.target.value)}
+            >
               <option value="all">{L("All annotators")}</option>
-              {annotators.map((u) => <option key={u.u} value={u.u}>{u.u}</option>)}
+              {annotators.map((u) => (
+                <option key={u.u} value={u.u}>
+                  {u.u}
+                </option>
+              ))}
             </select>
           </div>
         )}
@@ -1346,7 +1916,7 @@ function IO() {
           {annotationCount}
         </p>
         <p className="mut">{L("Export as JSON")}</p>
-        <textarea readOnly value={txt} />
+        <textarea id="export-text" name="export-text" readOnly value={txt} />
         <div className="row" style={{ marginTop: 6 }}>
           <button className="p" onClick={copy}>
             {L("Copy")}
@@ -1377,12 +1947,18 @@ function Acct() {
     <div className="card">
       <div className="row">
         <input
+          id="old-password"
+          name="old-password"
+          autoComplete="current-password"
           type="password"
           placeholder={L("Old password")}
           value={o}
           onChange={(e) => setO(e.target.value)}
         />
         <input
+          id="new-password"
+          name="new-password"
+          autoComplete="new-password"
           type="password"
           placeholder={L("New password")}
           value={n}

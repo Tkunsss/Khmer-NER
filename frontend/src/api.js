@@ -21,6 +21,14 @@ export async function api(m, p, b) {
     body: b ? JSON.stringify(b) : undefined,
   });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || "Request failed");
+  if (!r.ok)
+    throw new Error(
+      j.error ||
+        (r.status === 409
+          ? "Already exists (409 Conflict)"
+          : r.status === 400
+            ? "Invalid input (400 Bad Request). Check the username and password."
+            : "Request failed (" + r.status + ")"),
+    );
   return j;
 }

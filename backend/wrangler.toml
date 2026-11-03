@@ -6,4 +6,4 @@ workers_dev = true
 
 [[hyperdrive]]
 binding = "HYPERDRIVE"
-id = "REPLACE_WITH_HYPERDRIVE_ID"
+id = "88e708bf169d40b1825d4e808c2c0224"

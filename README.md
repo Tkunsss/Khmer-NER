@@ -16,7 +16,9 @@ approved schema setup. The Worker does not change `backend/server.js`,
 ### 1. Create a Hyperdrive configuration
 
 1. From `backend`, authenticate Wrangler and upload the existing Aiven CA
-   certificate:
+   certificate. Confirm it is the current CA for this Aiven service/project.
+   The command requires Wrangler 4.9.0 or newer; the checked-in PEM contains
+   one CA certificate, not a multi-certificate bundle:
 
    ```powershell
    npx wrangler login
@@ -30,17 +32,70 @@ approved schema setup. The Worker does not change `backend/server.js`,
    database name, and database username/password from the Aiven service
    details. Enter credentials only in the Cloudflare dashboard; do not put
    them in source control or command-line arguments.
-3. Configure server certificate verification with the uploaded Aiven CA and
-   **Verify full** (`VERIFY_IDENTITY`) when the Aiven certificate hostname
-   matches. Keep TLS verification enabled; do not use an unverified TLS mode.
-   Configure Aiven networking to allow the Hyperdrive connection without
-   broadly exposing the database.
-4. Create the configuration and copy its Hyperdrive ID. In
-   `backend/wrangler.toml`, replace `REPLACE_WITH_HYPERDRIVE_ID` with that ID.
+3. Configure server certificate verification with the uploaded Aiven CA.
+   Choose **Verify full** (`VERIFY_IDENTITY`) if the Aiven hostname matches a
+   name in the server certificate; otherwise use **Verify CA** (`VERIFY_CA`).
+   Keep TLS and certificate verification enabled. Hyperdrive's **Required**
+   (`REQUIRED`) mode also enforces TLS, but validates certificates against
+   WebPKI; use it only if the Aiven server certificate chains to a WebPKI
+   trusted CA. Configure Aiven networking to allow the Hyperdrive connection
+   without broadly exposing the database.
+4. Create the configuration. Its ID is already set in
+   `backend/wrangler.toml` as the `HYPERDRIVE` binding. If you recreate the
+   configuration, replace that ID with the new one.
 
 The Worker uses the Hyperdrive binding properties and `mysql2`'s documented
 Workers compatibility option (`disableEval: true`). No database URI or
-credential is stored in the repository.
+credential is stored in the repository. Hyperdrive handles TLS to Aiven; the
+Worker's `mysql2` connection uses the Hyperdrive-provided host, username,
+password, database, and port.
+
+See Cloudflare's [Hyperdrive TLS certificate and mode
+documentation](https://developers.cloudflare.com/hyperdrive/configuration/tls-ssl-certificates-for-hyperdrive/)
+for certificate upload and verification details.
+
+### Database connectivity check
+
+The public `GET /health` endpoint checks only that the Worker is responding.
+For a read-only Hyperdrive connection check, `GET /health/db` requires the
+separate `HEALTH_CHECK_TOKEN` secret. The endpoint runs `SELECT 1`, returns
+only `{"status":"ok"}` or a generic service-unavailable error, and does not
+read or change application data. It logs only an error code on failure.
+
+Generate a random token locally and keep it in a password manager:
+
+```powershell
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+```
+
+From `backend`, store the token as a Worker secret when prompted:
+
+```powershell
+npx wrangler secret put HEALTH_CHECK_TOKEN
+```
+
+After manually deploying the Worker, test the endpoint in PowerShell. The
+token prompt is masked:
+
+```powershell
+$secureToken = Read-Host "Health-check token" -AsSecureString
+$pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
+try {
+  $token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+  $headers = @{ Authorization = ("Bear" + "er " + $token) }
+  Invoke-RestMethod `
+    -Uri "https://khmer-ner-api.sotikunchhayny.workers.dev/health/db" `
+    -Headers $headers
+} finally {
+  [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+  Remove-Variable headers -ErrorAction SilentlyContinue
+  Remove-Variable token -ErrorAction SilentlyContinue
+}
+```
+
+An unauthorized request intentionally returns `404`. A successful request
+returns `status: ok`; a database connection/query failure returns HTTP `503`
+without exposing connection details.
 
 ### 2. Configure and deploy the Worker
 
@@ -72,10 +127,10 @@ In the Cloudflare dashboard:
 1. Open **Workers & Pages** and select the existing Pages project.
 2. Under **Settings** > **Builds & deployments**, set the root directory to
    `frontend`, build command to `npm run build`, and output directory to `dist`.
-3. Under **Settings** > **Environment variables**, add `BACKEND_URL` with the
-   Worker origin only (for example
-   `https://khmer-ner-api.<your-account-subdomain>.workers.dev`) for each
-   environment you intend to use. Do not add a trailing `/api`.
+3. Under **Settings** > **Environment variables**, add `BACKEND_URL` with this
+   Worker origin for each Pages environment you intend to use:
+   `https://khmer-ner-api.sotikunchhayny.workers.dev`. Do not add a trailing
+   slash or `/api`.
 4. Redeploy Pages so the existing Pages Function at
    `frontend/functions/api/[[path]].js` can proxy `/api/*` to the Worker.
 
@@ -85,6 +140,10 @@ cross-origin cookie/CORS requirements. Do not change the frontend to call the
 Worker URL directly. `ALLOWED_ORIGIN` is optional and is only for explicitly
 configured cross-origin preflight requests; it is not needed for the Pages
 proxy.
+
+The existing Vercel rewrite in `frontend/vercel.json` continues to point to
+Render and is independent of Cloudflare Pages. Do not change it to configure
+Cloudflare Pages; Pages uses its Function and the `BACKEND_URL` setting above.
 
 ### 4. Local development
 

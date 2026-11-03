@@ -198,6 +198,20 @@ function corsHeaders(request, env) {
   };
 }
 
+async function matchesHealthCheckToken(expected, provided) {
+  const [expectedHash, providedHash] = await Promise.all(
+    [expected, provided].map((value) =>
+      crypto.subtle.digest("SHA-256", encoder.encode(value)),
+    ),
+  );
+  const expectedBytes = new Uint8Array(expectedHash);
+  const providedBytes = new Uint8Array(providedHash);
+  let difference = 0;
+  for (let i = 0; i < expectedBytes.length; i++)
+    difference |= expectedBytes[i] ^ providedBytes[i];
+  return difference === 0;
+}
+
 async function handleApi(request, env, connection, body, user) {
   const method = request.method;
   const path = parsePath(new URL(request.url).pathname);
@@ -973,6 +987,54 @@ export default {
           ? noContent()
           : err(403, "Origin is not allowed."),
       );
+    }
+    if (request.method === "GET" && url.pathname === "/health/db") {
+      const authorization = request.headers.get("authorization") || "";
+      const providedToken = authorization.startsWith("Bearer ")
+        ? authorization.slice(7)
+        : "";
+      if (
+        !env.HEALTH_CHECK_TOKEN ||
+        !(await matchesHealthCheckToken(env.HEALTH_CHECK_TOKEN, providedToken))
+      )
+        return withHeaders(err(404, "Not found."));
+
+      if (!env.HYPERDRIVE) {
+        console.error("Database health check failed: HYPERDRIVE binding is missing");
+        return withHeaders(err(503, "Database connection unavailable."));
+      }
+
+      let connection;
+      try {
+        connection = await createConnection({
+          host: env.HYPERDRIVE.host,
+          user: env.HYPERDRIVE.user,
+          password: env.HYPERDRIVE.password,
+          database: env.HYPERDRIVE.database,
+          port: env.HYPERDRIVE.port,
+          charset: "utf8mb4",
+          disableEval: true,
+        });
+        const result = await execute(connection, "select 1 as ok");
+        if (Number(result.rows[0]?.ok) !== 1)
+          throw new Error("Health query returned an unexpected result");
+        return withHeaders(json({ status: "ok" }));
+      } catch (error) {
+        console.error("Database health check failed", {
+          code: typeof error?.code === "string" ? error.code : "UNKNOWN",
+        });
+        return withHeaders(err(503, "Database connection unavailable."));
+      } finally {
+        if (connection) {
+          try {
+            await connection.end();
+          } catch (error) {
+            console.error("Failed to close health-check connection", {
+              code: typeof error?.code === "string" ? error.code : "UNKNOWN",
+            });
+          }
+        }
+      }
     }
     if (request.method === "GET" && url.pathname === "/health")
       return withHeaders(new Response("ok", { headers: { "content-type": "text/plain" } }));

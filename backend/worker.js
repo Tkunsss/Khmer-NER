@@ -124,6 +124,7 @@ function rowForOffset(text, offset) {
 
 function maskUnassignedRows(text, assignments) {
   let row = 1;
+  let assignmentIndex = 0;
   return text
     .split(/(\r\n|\r|\n)/)
     .map((part) => {
@@ -131,9 +132,13 @@ function maskUnassignedRows(text, assignments) {
         row++;
         return part;
       }
-      return assignments.some(
-        (assignment) => row >= assignment.start && row <= assignment.end,
+      while (
+        assignmentIndex < assignments.length &&
+        assignments[assignmentIndex].end < row
       )
+        assignmentIndex++;
+      const assignment = assignments[assignmentIndex];
+      return assignment && row >= assignment.start && row <= assignment.end
         ? part
         : "•".repeat(part.length);
     })
@@ -413,6 +418,9 @@ async function handleApi(request, env, connection, body, user) {
       isAdmin ? [] : [username, username, username],
     );
     const annsByDoc = new Map();
+    const docsById = new Map(
+      docs.rows.map((doc) => [String(doc.id), doc]),
+    );
     for (const annotation of annotations.rows) {
       const key = String(annotation.doc_id);
       if (!annsByDoc.has(key)) annsByDoc.set(key, []);
@@ -426,25 +434,36 @@ async function handleApi(request, env, connection, body, user) {
     }
     if (!isAdmin) {
       for (const [docId, anns] of annsByDoc) {
-        const doc = docs.rows.find((row) => String(row.id) === docId);
-        const assignedRows = (rowAssignmentsByDoc.get(docId) || []).filter(
-          (assignment) => assignment.username === username,
-        );
+        const doc = docsById.get(docId);
+        const assignedRows = rowAssignmentsByDoc.get(docId) || [];
         const fullAccess =
           !assignedRows.length &&
           (doc.assignee === username ||
             (assignedByDoc.get(docId) || []).includes(username));
-        if (!fullAccess)
-          annsByDoc.set(
-            docId,
-            anns.filter((annotation) => {
-              const row = rowForOffset(doc.body, annotation.s);
-              return assignedRows.some(
-                (assignment) =>
-                  row >= assignment.start && row <= assignment.end,
-              );
-            }),
-          );
+        if (!fullAccess) {
+          let position = 0;
+          let row = 1;
+          let assignmentIndex = 0;
+          const visibleAnnotations = [];
+          for (const annotation of anns) {
+            while (position < annotation.s) {
+              if (doc.body[position] === "\r") {
+                row++;
+                if (doc.body[position + 1] === "\n") position++;
+              } else if (doc.body[position] === "\n") row++;
+              position++;
+            }
+            while (
+              assignmentIndex < assignedRows.length &&
+              assignedRows[assignmentIndex].end < row
+            )
+              assignmentIndex++;
+            const assignment = assignedRows[assignmentIndex];
+            if (assignment && row >= assignment.start && row <= assignment.end)
+              visibleAnnotations.push(annotation);
+          }
+          annsByDoc.set(docId, visibleAnnotations);
+        }
       }
     }
     return json(

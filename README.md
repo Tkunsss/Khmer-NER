@@ -1,6 +1,6 @@
 # Khmer NER Annotator (React + Express + MySQL)
 
-Deploy: **Aiven MySQL** (database) > **Render** (API) > **Vercel** (React site).
+Deploy: **Aiven MySQL** (database) > **Render** (API) > **Vercel or Cloudflare Pages** (React site).
 
 1. **Aiven**: create a MySQL service and copy its **Service URI**. The
    service must be running and allow connections from your API host.
@@ -15,6 +15,18 @@ Deploy: **Aiven MySQL** (database) > **Render** (API) > **Vercel** (React site).
 5. **Vercel**: Add New > Project > pick the repo. Root Directory = `frontend` (Vite is detected automatically). Deploy.
 
 The browser only talks to your Vercel domain; Vercel forwards `/api` to Render, so login cookies are same-site and no CORS is needed.
+
+### Cloudflare Pages deployment
+
+Create a **Pages** project (not a Workers-only project) from the repository and
+set the project root directory to `frontend`. The Pages Function in
+`frontend/functions/api/[[path]].js` forwards `/api/*` requests to Render, so
+the browser can continue using same-origin API requests and login cookies.
+
+In the Pages project, add the `BACKEND_URL` environment variable with the
+backend URL (for example, `https://khmer-ner.onrender.com`) for both Production
+and Preview environments as needed. Deploy the project after setting the
+variable.
 
 ### Local setup
 

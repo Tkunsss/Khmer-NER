@@ -141,7 +141,7 @@ function maskUnassignedRows(text, assignments) {
 }
 
 async function execute(connection, sql, params = []) {
-  const [result] = await connection.execute(sql, params);
+  const [result] = await connection.query(sql, params);
   return Array.isArray(result)
     ? { rows: result, rowCount: result.length }
     : { rows: [], rowCount: result.affectedRows, insertId: result.insertId };
@@ -827,10 +827,15 @@ async function handleApi(request, env, connection, body, user) {
     try {
       const found = await execute(
         connection,
-        "select count(*) as n from import_chunks where upload_id=? and username=?",
+        "select count(*) as n,min(chunk_index) as first_index,max(chunk_index) as last_index,coalesce(sum(octet_length(chunk)),0) as byte_count from import_chunks where upload_id=? and username=?",
         [uploadId, username],
       );
-      if (Number(found.rows[0].n) !== chunks) {
+      const upload = found.rows[0];
+      if (
+        Number(upload.n) !== chunks ||
+        Number(upload.first_index) !== 0 ||
+        Number(upload.last_index) !== chunks - 1
+      ) {
         await connection.rollback();
         await deleteImportChunks(connection, uploadId, username);
         return err(400, "The upload is incomplete. Please select the file again.");
@@ -845,29 +850,19 @@ async function handleApi(request, env, connection, body, user) {
         ],
       );
       const id = inserted.insertId;
-      for (let start = 0; start < chunks; start += 8) {
-        const rows = await execute(
-          connection,
-          "select chunk_index,chunk from import_chunks where upload_id=? and username=? and chunk_index>=? and chunk_index<? order by chunk_index",
-          [uploadId, username, start, Math.min(start + 8, chunks)],
-        );
-        if (rows.rows.length !== Math.min(8, chunks - start)) {
-          await connection.rollback();
-          await deleteImportChunks(connection, uploadId, username);
-          return err(400, "The upload is incomplete. Please select the file again.");
-        }
-        const text = rows.rows
-          .map((row, offset) => {
-            if (row.chunk_index !== start + offset)
-              throw new Error("Invalid import chunk sequence");
-            return row.chunk;
-          })
-          .join("");
-        await execute(connection, "update docs set body=concat(body,?) where id=?", [
-          text,
-          id,
-        ]);
-      }
+      await execute(connection, "set session group_concat_max_len=4294967295");
+      await execute(
+        connection,
+        "update docs set body=(select group_concat(chunk order by chunk_index separator '') from import_chunks where upload_id=? and username=?) where id=?",
+        [uploadId, username, id],
+      );
+      const imported = await execute(
+        connection,
+        "select octet_length(body) as byte_count from docs where id=?",
+        [id],
+      );
+      if (Number(imported.rows[0].byte_count) !== Number(upload.byte_count))
+        throw new Error("Imported document content was truncated");
       await deleteImportChunks(connection, uploadId, username);
       await connection.commit();
       return json({ count: 1 });

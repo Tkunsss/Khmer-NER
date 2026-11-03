@@ -125,24 +125,37 @@ function rowForOffset(text, offset) {
 function maskUnassignedRows(text, assignments) {
   let row = 1;
   let assignmentIndex = 0;
-  return text
-    .split(/(\r\n|\r|\n)/)
-    .map((part) => {
-      if (/^(?:\r\n|\r|\n)$/.test(part)) {
-        row++;
-        return part;
-      }
-      while (
-        assignmentIndex < assignments.length &&
-        assignments[assignmentIndex].end < row
-      )
-        assignmentIndex++;
-      const assignment = assignments[assignmentIndex];
-      return assignment && row >= assignment.start && row <= assignment.end
-        ? part
-        : "•".repeat(part.length);
-    })
-    .join("");
+  let position = 0;
+  const parts = [];
+  while (position < text.length) {
+    let lineEnd = text.indexOf("\n", position);
+    const crEnd = text.indexOf("\r", position);
+    if (lineEnd < 0 || (crEnd >= 0 && crEnd < lineEnd)) lineEnd = crEnd;
+    if (lineEnd < 0) lineEnd = text.length;
+
+    while (
+      assignmentIndex < assignments.length &&
+      assignments[assignmentIndex].end < row
+    )
+      assignmentIndex++;
+    const assignment = assignments[assignmentIndex];
+    parts.push(
+      assignment && row >= assignment.start && row <= assignment.end
+        ? text.slice(position, lineEnd)
+        : "•".repeat(lineEnd - position),
+    );
+    if (lineEnd === text.length) break;
+
+    if (text[lineEnd] === "\r" && text[lineEnd + 1] === "\n") {
+      parts.push("\r\n");
+      position = lineEnd + 2;
+    } else {
+      parts.push(text[lineEnd]);
+      position = lineEnd + 1;
+    }
+    row++;
+  }
+  return parts.join("");
 }
 
 async function execute(connection, sql, params = []) {

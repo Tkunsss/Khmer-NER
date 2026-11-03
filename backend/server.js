@@ -110,20 +110,38 @@ const rowForOffset = (text, offset) => {
 };
 const maskUnassignedRows = (text, assignments) => {
   let row = 1;
-  return text
-    .split(/(\r\n|\r|\n)/)
-    .map((part) => {
-      if (/^(?:\r\n|\r|\n)$/.test(part)) {
-        row++;
-        return part;
-      }
-      return assignments.some(
-        (assignment) => row >= assignment.start && row <= assignment.end,
-      )
-        ? part
-        : "•".repeat(part.length);
-    })
-    .join("");
+  let assignmentIndex = 0;
+  let position = 0;
+  const parts = [];
+  while (position < text.length) {
+    let lineEnd = text.indexOf("\n", position);
+    const crEnd = text.indexOf("\r", position);
+    if (lineEnd < 0 || (crEnd >= 0 && crEnd < lineEnd)) lineEnd = crEnd;
+    if (lineEnd < 0) lineEnd = text.length;
+
+    while (
+      assignmentIndex < assignments.length &&
+      assignments[assignmentIndex].end < row
+    )
+      assignmentIndex++;
+    const assignment = assignments[assignmentIndex];
+    parts.push(
+      assignment && row >= assignment.start && row <= assignment.end
+        ? text.slice(position, lineEnd)
+        : "•".repeat(lineEnd - position),
+    );
+    if (lineEnd === text.length) break;
+
+    if (text[lineEnd] === "\r" && text[lineEnd + 1] === "\n") {
+      parts.push("\r\n");
+      position = lineEnd + 2;
+    } else {
+      parts.push(text[lineEnd]);
+      position = lineEnd + 1;
+    }
+    row++;
+  }
+  return parts.join("");
 };
 app.use(
   "/api",
@@ -371,6 +389,9 @@ app.get(
       a ? [] : [q.u.u,q.u.u,q.u.u],
     );
     const annsByDoc = new Map();
+    const docsById = new Map(
+      docs.rows.map((doc) => [String(doc.id), doc]),
+    );
     for (const annotation of annotations.rows) {
       const key = String(annotation.doc_id);
       if (!annsByDoc.has(key)) annsByDoc.set(key, []);
@@ -384,27 +405,36 @@ app.get(
     }
     if (!a) {
       for (const [docId, anns] of annsByDoc) {
-        const doc = docs.rows.find((row) => String(row.id) === docId);
-        const assignedRows = (rowAssignmentsByDoc.get(docId) || []).filter(
-          (assignment) => assignment.username === q.u.u,
-        );
+        const doc = docsById.get(docId);
+        const assignedRows = rowAssignmentsByDoc.get(docId) || [];
         const fullAccess =
           !assignedRows.length &&
           (doc.assignee === q.u.u ||
             (assignedByDoc.get(docId) || []).includes(q.u.u));
-        if (!fullAccess)
-          annsByDoc.set(
-            docId,
-            anns.filter((annotation) => {
-              const row = rowForOffset(doc.body, annotation.s);
-              return assignedRows.some(
-                (assignment) =>
-                  assignment.username === q.u.u &&
-                  row >= assignment.start &&
-                  row <= assignment.end,
-              );
-            }),
-          );
+        if (!fullAccess) {
+          let position = 0;
+          let row = 1;
+          let assignmentIndex = 0;
+          const visibleAnnotations = [];
+          for (const annotation of anns) {
+            while (position < annotation.s) {
+              if (doc.body[position] === "\r") {
+                row++;
+                if (doc.body[position + 1] === "\n") position++;
+              } else if (doc.body[position] === "\n") row++;
+              position++;
+            }
+            while (
+              assignmentIndex < assignedRows.length &&
+              assignedRows[assignmentIndex].end < row
+            )
+              assignmentIndex++;
+            const assignment = assignedRows[assignmentIndex];
+            if (assignment && row >= assignment.start && row <= assignment.end)
+              visibleAnnotations.push(annotation);
+          }
+          annsByDoc.set(docId, visibleAnnotations);
+        }
       }
     }
     s.json(

@@ -5,7 +5,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": {
-        target: "https://khmer-ner.onrender.com",
+        target: "http://localhost:8787",
         changeOrigin: true,
       },
     },

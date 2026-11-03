@@ -752,10 +752,15 @@ app.post(
     try {
       await c.begin();
       const found = await c.query(
-        "select count(*) as n from import_chunks where upload_id=? and username=?",
+        "select count(*) as n,min(chunk_index) as first_index,max(chunk_index) as last_index,coalesce(sum(octet_length(chunk)),0) as byte_count from import_chunks where upload_id=? and username=?",
         [uploadId, q.u.u],
       );
-      if (Number(found.rows[0].n) !== chunks) {
+      const upload = found.rows[0];
+      if (
+        Number(upload.n) !== chunks ||
+        Number(upload.first_index) !== 0 ||
+        Number(upload.last_index) !== chunks - 1
+      ) {
         await c.rollback();
         await deleteImportChunks(c, uploadId, q.u.u);
         return err(s, 400, "The upload is incomplete. Please select the file again.");
@@ -766,22 +771,19 @@ app.post(
           [String(title || "Untitled").slice(0, 1000), "", q.u.role === "admin" ? null : q.u.u],
         )
       ).insertId;
-      for (let start = 0; start < chunks; start += 8) {
-        const rows = await c.query(
-          "select chunk_index,chunk from import_chunks where upload_id=? and username=? and chunk_index>=? and chunk_index<? order by chunk_index",
-          [uploadId, q.u.u, start, Math.min(start + 8, chunks)],
-        );
-        if (rows.rows.length !== Math.min(8, chunks - start)) {
-          await c.rollback();
-          await deleteImportChunks(c, uploadId, q.u.u);
-          return err(s, 400, "The upload is incomplete. Please select the file again.");
-        }
-        const text = rows.rows.map((row, offset) => {
-          if (row.chunk_index !== start + offset) throw new Error("Invalid import chunk sequence");
-          return row.chunk;
-        }).join("");
-        await c.query("update docs set body=concat(body,?) where id=?", [text, id]);
-      }
+      await c.query("set session group_concat_max_len=4294967295");
+      await c.query(
+        "update docs set body=(select group_concat(chunk order by chunk_index separator '') from import_chunks where upload_id=? and username=?) where id=?",
+        [uploadId, q.u.u, id],
+      );
+      const imported = await c.query(
+        "select octet_length(body) as byte_count from docs where id=?",
+        [id],
+      );
+      if (
+        Number(imported.rows[0].byte_count) !== Number(upload.byte_count)
+      )
+        throw new Error("Imported document content was truncated");
       await deleteImportChunks(c, uploadId, q.u.u);
       await c.commit();
       s.json({ count: 1 });

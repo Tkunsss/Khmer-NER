@@ -201,10 +201,11 @@ the production Worker is not deployed by these instructions.
 
 The Worker retains the existing `/health` endpoint and the `/api` routes for
 login/logout/current user/password, users, labels, documents and assignments,
-annotations, and JSON/chunked imports. JWTs remain HS256 tokens in the `sid`
-cookie; password hashes continue using `bcryptjs`, so stored hashes are
-compatible. The Worker re-reads the current user role from MySQL on
-authenticated requests, as the existing backend does.
+annotations, and JSON/chunked imports. Chunked imports are assembled inside
+MySQL so large uploads do not need to be copied through the Worker runtime.
+JWTs remain HS256 tokens in the `sid` cookie; password hashes continue using
+`bcryptjs`, so stored hashes are compatible. The Worker re-reads the current
+user role from MySQL on authenticated requests, as the existing backend does.
 
 Compatibility review of the locked backend packages:
 

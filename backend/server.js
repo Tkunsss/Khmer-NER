@@ -457,8 +457,106 @@ app.get(
         review: d.review,
         note: d.note,
         anns: annsByDoc.get(String(d.id)) || [],
+        annCount: (annsByDoc.get(String(d.id)) || []).length,
+        rowCount: d.body.split(/\r\n|\r|\n/).length,
       })),
     );
+  }),
+);
+app.get(
+  "/api/docs/:id",
+  h(async (q, s) => {
+    const isAdmin = q.u.role === "admin";
+    const id = Number(q.params.id);
+    if (!Number.isSafeInteger(id) || id < 1)
+      return err(s, 400, "Invalid document.");
+    const doc = (
+      await pool.query(
+        `select id,title,body,assignee,done,review,note from docs
+         where id=? ${
+           isAdmin
+             ? ""
+             : "and (exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=docs.id and ra.username=?))"
+         }`,
+        isAdmin ? [id] : [id, q.u.u, q.u.u, q.u.u],
+      )
+    ).rows[0];
+    if (!doc) return err(s, 404, "Document not found.");
+
+    const assignments = await pool.query(
+      "select username from doc_assignments where doc_id=? order by username",
+      [id],
+    );
+    const assignees = [
+      ...new Set([
+        ...assignments.rows.map((row) => row.username),
+        ...(doc.assignee ? [doc.assignee] : []),
+      ]),
+    ];
+    const rowAssignments = await pool.query(
+      `select username,row_start as start,row_end as end from row_assignments
+       where doc_id=? ${isAdmin ? "" : "and username=?"} order by row_start`,
+      isAdmin ? [id] : [id, q.u.u],
+    );
+    const annotations = await pool.query(
+      "select id,s,e,label l,author `by` from anns where doc_id=? order by s",
+      [id],
+    );
+    let visibleAnnotations = annotations.rows;
+    if (!isAdmin) {
+      const fullAccess =
+        !rowAssignments.rowCount &&
+        (doc.assignee === q.u.u ||
+          assignments.rows.some((row) => row.username === q.u.u));
+      if (!fullAccess) {
+        let position = 0;
+        let row = 1;
+        let assignmentIndex = 0;
+        visibleAnnotations = [];
+        for (const annotation of annotations.rows) {
+          while (position < annotation.s) {
+            if (doc.body[position] === "\r") {
+              row++;
+              if (doc.body[position + 1] === "\n") position++;
+            } else if (doc.body[position] === "\n") {
+              row++;
+            }
+            position++;
+          }
+          while (
+            assignmentIndex < rowAssignments.rows.length &&
+            rowAssignments.rows[assignmentIndex].end < row
+          )
+            assignmentIndex++;
+          const assignment = rowAssignments.rows[assignmentIndex];
+          if (assignment && row >= assignment.start && row <= assignment.end)
+            visibleAnnotations.push(annotation);
+        }
+      }
+    }
+
+    s.json({
+      id: String(doc.id),
+      title: doc.title,
+      text:
+        !isAdmin && rowAssignments.rowCount
+          ? maskUnassignedRows(doc.body, rowAssignments.rows)
+          : doc.body,
+      assignees,
+      as: assignees.join(", "),
+      rowAssignments: rowAssignments.rows,
+      rowCount: doc.body.split(/\r\n|\r|\n/).length,
+      done: !!doc.done,
+      review: doc.review,
+      note: doc.note,
+      anns: visibleAnnotations.map((annotation) => ({
+        id: String(annotation.id),
+        s: annotation.s,
+        e: annotation.e,
+        l: annotation.l,
+        by: annotation.by,
+      })),
+    });
   }),
 );
 app.patch(

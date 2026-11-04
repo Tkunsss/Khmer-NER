@@ -234,7 +234,16 @@ restarted or split across isolates, so configure Cloudflare's edge rate
 limiting as additional protection before public cutover if global enforcement
 is required.
 
-The existing Render backend and `render.yaml` remain unchanged. The Vercel
+The Worker `GET /api/docs` endpoint returns document metadata and annotation
+counts without loading document bodies or annotation records. The authenticated
+`GET /api/docs/:id` endpoint returns one document's text and visible
+annotations; the frontend loads details when a document is opened and loads
+all details only when preparing an export. For row-restricted documents,
+`annCount` is `null` in the list because an accurate visible count requires
+examining annotation offsets against document rows; details return only
+annotations in the user's assigned rows.
+
+The existing Render backend and `render.yaml` remain available. The Vercel
 rewrite in `frontend/vercel.json` also remains unchanged; Cloudflare Pages
 uses its own Pages Function for `/api`.
 

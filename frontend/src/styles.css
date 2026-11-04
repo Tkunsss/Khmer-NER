@@ -228,9 +228,16 @@ button.p,
   align-items: center;
 }
 .import-progress {
-  color: var(--mut);
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #fff;
   font-size: 14px;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 .tw {
   overflow: auto;

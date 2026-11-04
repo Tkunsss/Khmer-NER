@@ -394,16 +394,19 @@ async function handleApi(request, env, connection, body, user) {
   }
 
   if (method === "GET" && parts.length === 3 && parts[2] === "docs") {
+    const startedAt = performance.now();
     const docs = await execute(
       connection,
       `select id,title,body,assignee,done,review,note from docs
        ${isAdmin ? "" : "where exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=docs.id and ra.username=?)"} order by id`,
       isAdmin ? [] : [username, username, username],
     );
+    const docsAt = performance.now();
     const assignments = await execute(
       connection,
       "select doc_id,username from doc_assignments order by username",
     );
+    const assignmentsAt = performance.now();
     const assignedByDoc = new Map();
     for (const row of assignments.rows) {
       const key = String(row.doc_id);
@@ -416,6 +419,7 @@ async function handleApi(request, env, connection, body, user) {
        ${isAdmin ? "" : "where username=?"} order by doc_id,row_start`,
       isAdmin ? [] : [username],
     );
+    const rowAssignmentsAt = performance.now();
     const rowAssignmentsByDoc = new Map();
     for (const row of rowAssignments.rows) {
       const key = String(row.doc_id);
@@ -433,6 +437,7 @@ async function handleApi(request, env, connection, body, user) {
        ${isAdmin ? "" : "where (exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?) or d.assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=d.id and ra.username=?))"} order by x.s`,
       isAdmin ? [] : [username, username, username],
     );
+    const annotationsAt = performance.now();
     const annsByDoc = new Map();
     const docsById = new Map(
       docs.rows.map((doc) => [String(doc.id), doc]),
@@ -482,36 +487,57 @@ async function handleApi(request, env, connection, body, user) {
         }
       }
     }
-    return json(
-      docs.rows.map((doc) => {
-        const assignees = [
-          ...new Set([
-            ...(assignedByDoc.get(String(doc.id)) || []),
-            ...(doc.assignee ? [doc.assignee] : []),
-          ]),
-        ];
-        return {
-          id: String(doc.id),
-          title: doc.title,
-          text:
-            !isAdmin && rowAssignmentsByDoc.has(String(doc.id))
-              ? maskUnassignedRows(
-                  doc.body,
-                  (rowAssignmentsByDoc.get(String(doc.id)) || []).filter(
-                    (assignment) => assignment.username === username,
-                  ),
-                )
-              : doc.body,
-          assignees,
-          as: assignees.join(", "),
-          rowAssignments: rowAssignmentsByDoc.get(String(doc.id)) || [],
-          done: !!doc.done,
-          review: doc.review,
-          note: doc.note,
-          anns: annsByDoc.get(String(doc.id)) || [],
-        };
-      }),
-    );
+    let totalChars = 0;
+    const result = docs.rows.map((doc) => {
+      totalChars += doc.body.length;
+      const assignees = [
+        ...new Set([
+          ...(assignedByDoc.get(String(doc.id)) || []),
+          ...(doc.assignee ? [doc.assignee] : []),
+        ]),
+      ];
+      return {
+        id: String(doc.id),
+        title: doc.title,
+        text:
+          !isAdmin && rowAssignmentsByDoc.has(String(doc.id))
+            ? maskUnassignedRows(
+                doc.body,
+                (rowAssignmentsByDoc.get(String(doc.id)) || []).filter(
+                  (assignment) => assignment.username === username,
+                ),
+              )
+            : doc.body,
+        assignees,
+        as: assignees.join(", "),
+        rowAssignments: rowAssignmentsByDoc.get(String(doc.id)) || [],
+        done: !!doc.done,
+        review: doc.review,
+        note: doc.note,
+        anns: annsByDoc.get(String(doc.id)) || [],
+      };
+    });
+    const processedAt = performance.now();
+    const serialized = JSON.stringify(result);
+    const responseBody = encoder.encode(serialized);
+    const serializedAt = performance.now();
+    const responseBytes = responseBody.byteLength;
+    console.log("api/docs phases", {
+      dbDocsMs: Math.round(docsAt - startedAt),
+      dbAssignmentsMs: Math.round(assignmentsAt - docsAt),
+      dbRowAssignmentsMs: Math.round(rowAssignmentsAt - assignmentsAt),
+      dbAnnotationsMs: Math.round(annotationsAt - rowAssignmentsAt),
+      processingMs: Math.round(processedAt - annotationsAt),
+      serializeMs: Math.round(serializedAt - processedAt),
+      docCount: docs.rows.length,
+      annCount: annotations.rows.length,
+      totalChars,
+      responseBytes,
+      isAdmin,
+    });
+    return new Response(responseBody, {
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
   }
 
   if (method === "PATCH" && parts.length === 4 && parts[2] === "docs") {

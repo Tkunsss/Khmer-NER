@@ -52,8 +52,6 @@ export default function App() {
   // Old string-based messages from Import/Export, Account, Users... become toasts too.
   const setMsg = (m) => {
     if (!m) return;
-    if (/^(Uploading|Finishing import)/.test(m))
-      return notify(m, "info", "progress");
     dismiss("progress");
     notify(
       m,
@@ -1694,6 +1692,7 @@ function IO() {
     [selectedFiles, setSelectedFiles] = useState([]),
     [exportAnnotator, setExportAnnotator] = useState("all"),
     [importing, setImporting] = useState(false),
+    [importProgress, setImportProgress] = useState(""),
     annotators = db.users.filter((u) => u.role === "annotator"),
     exportDocs = db.docs.filter(
       (d) =>
@@ -1784,7 +1783,9 @@ function IO() {
               chunk,
             });
           if (index % 8 === 0)
-            setMsg(`Uploading ${f.name}: ${Math.round((end / f.size) * 100)}%`);
+            setImportProgress(
+              `Uploading ${f.name}: ${Math.round((end / f.size) * 100)}%`,
+            );
         }
         const rest = decoder.decode();
         if (rest)
@@ -1793,7 +1794,7 @@ function IO() {
             index: index++,
             chunk: rest,
           });
-        setMsg(`Finishing import: ${f.name}`);
+        setImportProgress(`Finishing import: ${f.name}`);
         const r = await api("POST", "/import/finish", {
           uploadId,
           chunks: index,
@@ -1814,6 +1815,7 @@ function IO() {
   };
   const doImport = async () => {
     setImporting(true);
+    setImportProgress("");
     try {
       if (selectedFiles.length) await files(selectedFiles);
       if (ta.trim()) await imp(ta, "Pasted");
@@ -1823,6 +1825,7 @@ function IO() {
       setSelectedFiles([]);
       if (fileInput.current) fileInput.current.value = "";
       setImporting(false);
+      setImportProgress("");
     }
   };
   const dl = () => {
@@ -1881,7 +1884,7 @@ function IO() {
           value={ta}
           onChange={(e) => setTa(e.target.value)}
         />
-        <div className="row" style={{ marginTop: 6 }}>
+        <div className="row import-actions" style={{ marginTop: 6 }}>
           <button
             className="p"
             disabled={importing || (!ta.trim() && !selectedFiles.length)}
@@ -1889,6 +1892,11 @@ function IO() {
           >
             {L("Import")}
           </button>
+          {importProgress && (
+            <span className="import-progress" role="status">
+              {importProgress}
+            </span>
+          )}
         </div>
       </div>
       <div className="card">

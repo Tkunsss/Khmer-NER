@@ -393,12 +393,15 @@ button.danger:hover:not(:disabled) {
 /* Pop-up messages */
 .toasts {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
+  top: calc(env(safe-area-inset-top, 0px) + 16px);
+  right: auto;
+  bottom: auto;
+  left: 50%;
   z-index: 1000;
   display: grid;
   gap: 8px;
   max-width: min(420px, calc(100vw - 32px));
+  transform: translateX(-50%);
 }
 .toast {
   display: flex;

@@ -136,11 +136,44 @@ async function local(m, p, b) {
       M.labels = M.labels.filter((l) => l.n !== id);
     }
   } else if (r === "docs") {
+    if (m === "GET" && id) {
+      const doc = D();
+      const ownRows = (doc.rowAssignments || []).filter(
+        (assignment) => assignment.username === U.u,
+      );
+      const visibleAnnotations = doc.anns.filter((annotation) =>
+        canAccessAnnotation(doc, annotation),
+      );
+      return JSON.parse(
+        JSON.stringify(
+          A
+            ? {
+                ...doc,
+                annCount: visibleAnnotations.length,
+                rowCount: doc.text.split(/\r\n|\r|\n/).length,
+              }
+            : {
+                ...doc,
+                text: ownRows.length
+                  ? maskUnassignedRows(doc.text, ownRows)
+                  : doc.text,
+                rowAssignments: ownRows,
+                anns: visibleAnnotations,
+                annCount: visibleAnnotations.length,
+                rowCount: doc.text.split(/\r\n|\r|\n/).length,
+              },
+        ),
+      );
+    }
     if (m === "GET")
       return JSON.parse(
         JSON.stringify(
           A
-            ? M.docs
+            ? M.docs.map((d) => ({
+                ...d,
+                annCount: d.anns.length,
+                rowCount: d.text.split(/\r\n|\r|\n/).length,
+              }))
             : M.docs
                 .filter(
                   (d) =>
@@ -149,6 +182,8 @@ async function local(m, p, b) {
                 )
                 .map((d) => ({
                   ...d,
+                  annCount: d.anns.length,
+                  rowCount: d.text.split(/\r\n|\r|\n/).length,
                   text: rowLimited(d, U.u)
                     ? maskUnassignedRows(
                         d.text,
@@ -161,6 +196,9 @@ async function local(m, p, b) {
                     (a) => a.username === U.u,
                   ),
                   anns: d.anns.filter((a) => canAccessAnnotation(d, a)),
+                  annCount: d.anns.filter((a) =>
+                    canAccessAnnotation(d, a),
+                  ).length,
                 })),
         ),
       );

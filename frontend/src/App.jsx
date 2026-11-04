@@ -29,6 +29,9 @@ export default function App() {
     [cur, setCur] = useState(null),
     [act, setAct] = useState(null),
     [weak, setWeak] = useState(false);
+  const [docDetails, setDocDetails] = useState({});
+  const docDetailsRef = useRef(docDetails);
+  const [openingTab, setOpeningTab] = useState(null);
   const [qf, setQf] = useState(""),
     [snapOn, setSnapOn] = useState(true);
   // Pop-up messages (toasts): always visible on screen, so nobody has to scroll up.
@@ -62,6 +65,40 @@ export default function App() {
   };
   const L = (s) => (lang === "km" && KM[s]) || s,
     rl = (r) => (lang === "km" ? RL[r] : r);
+  const replaceDocDetails = (details) => {
+    docDetailsRef.current = details;
+    setDocDetails(details);
+  };
+  const putDocDetail = (detail) => {
+    const next = { ...docDetailsRef.current, [detail.id]: detail };
+    docDetailsRef.current = next;
+    setDocDetails(next);
+  };
+  const loadAllDocDetails = async (documents = db.docs) => {
+    const missing = documents.filter(
+      (doc) => !docDetailsRef.current[doc.id],
+    );
+    const loaded = {};
+    let nextIndex = 0;
+    const worker = async () => {
+      while (nextIndex < missing.length) {
+        const doc = missing[nextIndex++];
+        loaded[doc.id] = await api(
+          "GET",
+          "/docs/" + encodeURIComponent(doc.id),
+        );
+      }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(4, missing.length) },
+        () => worker(),
+      ),
+    );
+    const next = { ...docDetailsRef.current, ...loaded };
+    replaceDocDetails(next);
+    return next;
+  };
   setSnap(snapOn);
   const toggle = () => {
     const n = lang === "km" ? "en" : "km";
@@ -84,6 +121,18 @@ export default function App() {
       ]);
       const u = role === "admin" ? await api("GET", "/users") : [];
       setDb({ labels: l, docs: d, users: u });
+      const activeDoc = cur && d.find((doc) => doc.id === cur);
+      if (activeDoc) {
+        replaceDocDetails({
+          [activeDoc.id]: await api(
+            "GET",
+            "/docs/" + encodeURIComponent(activeDoc.id),
+          ),
+        });
+      } else {
+        replaceDocDetails({});
+      }
+      return d;
     } catch (e) {
       if (/sign in/i.test(e.message)) out();
       else setMsg(e.message);
@@ -136,6 +185,9 @@ export default function App() {
     snapOn,
     setSnapOn,
     setWeak,
+    docDetails,
+    putDocDetail,
+    loadAllDocDetails,
   };
   if (!me)
     return (
@@ -201,9 +253,22 @@ export default function App() {
             <button
               key={x[0]}
               className={tab === x[0] ? "on" : ""}
-              onClick={() => {
-                setTab(x[0]);
+              disabled={openingTab === x[0]}
+              onClick={async () => {
                 setMsg("");
+                if (x[0] === "io") {
+                  setOpeningTab(x[0]);
+                  try {
+                    await loadAllDocDetails();
+                    setTab(x[0]);
+                  } catch (error) {
+                    notify(error.message || "Could not load documents.", "danger");
+                  } finally {
+                    setOpeningTab(null);
+                  }
+                } else {
+                  setTab(x[0]);
+                }
               }}
             >
               {L(x[1])}
@@ -316,14 +381,24 @@ function Review({ d }) {
 function Assignment({ d, annotators, L, run }) {
   const current = d.assignees || (d.as ? [d.as] : []);
   const [selected, setSelected] = useState(current);
+  const [rowCount, setRowCount] = useState(
+    d.rowCount || (d.text ? documentLines(d.text).length : null),
+  );
+  const [rowCountLoading, setRowCountLoading] = useState(false);
   useEffect(() => setSelected(current), [d.assignees, d.as]);
+  useEffect(() => {
+    const count = d.rowCount || (d.text ? documentLines(d.text).length : null);
+    setRowCount(count);
+    setEnd(count ? String(count) : "");
+  }, [d.id, d.rowCount, d.text]);
   const changed =
     selected.length !== current.length ||
     selected.some((u) => !current.includes(u));
-  const rows = documentLines(d.text).length,
-    [username, setUsername] = useState(annotators[0]?.u || ""),
+  const [username, setUsername] = useState(annotators[0]?.u || ""),
     [start, setStart] = useState("1"),
-    [end, setEnd] = useState(String(rows));
+    [end, setEnd] = useState(
+      String(d.rowCount || (d.text ? documentLines(d.text).length : "")),
+    );
   // status: "idle" | "busy" | "ok" | "error"
   const IDLE = { status: "idle", text: "", conflicts: [] };
   const [saveState, setSaveState] = useState(IDLE),
@@ -341,6 +416,25 @@ function Assignment({ d, annotators, L, run }) {
     set(state);
     if (state.status === "ok")
       setTimeout(() => set((s) => (s.status === "ok" ? IDLE : s)), 2500);
+  };
+
+  const ensureRowCount = async () => {
+    if (rowCount || rowCountLoading) return;
+    setRowCountLoading(true);
+    try {
+      const detail = await api("GET", "/docs/" + encodeURIComponent(d.id));
+      const count = detail.rowCount || documentLines(detail.text).length;
+      setRowCount(count);
+      setEnd(String(count));
+    } catch (error) {
+      setRowState({
+        ...IDLE,
+        status: "error",
+        text: error.message || "Could not load document rows.",
+      });
+    } finally {
+      setRowCountLoading(false);
+    }
   };
 
   const saveAssignment = async () => {
@@ -361,6 +455,7 @@ function Assignment({ d, annotators, L, run }) {
   const checkRows = () => {
     const s = +start,
       e = +end;
+    if (!rowCount) return { text: L("Could not load document rows.") };
     if (!annotators.length || !username)
       return { text: L("Choose an annotator.") };
     if (
@@ -368,9 +463,11 @@ function Assignment({ d, annotators, L, run }) {
       !Number.isInteger(e) ||
       s < 1 ||
       e < s ||
-      e > rows
+      e > rowCount
     )
-      return { text: `${L("Enter a valid row range between 1 and")} ${rows}.` };
+      return {
+        text: `${L("Enter a valid row range between 1 and")} ${rowCount}.`,
+      };
     const wholeDoc = d.assignees || (d.as ? [d.as] : []);
     if (wholeDoc.includes(username))
       return {
@@ -487,9 +584,10 @@ function Assignment({ d, annotators, L, run }) {
           )}
         </div>
       </details>
-      <details>
+      <details onToggle={(event) => event.currentTarget.open && ensureRowCount()}>
         <summary>
-          {L("Assign row range")} ({rows})
+          {L("Assign row range")}
+          {rowCount ? ` (${rowCount})` : ""}
         </summary>
         <div className="assignment-options">
           <div className="panel-title" title={d.title}>
@@ -517,7 +615,7 @@ function Assignment({ d, annotators, L, run }) {
               id={`row-from-${d.id}`}
               name={`row-from-${d.id}`}
               min="1"
-              max={rows}
+              max={rowCount || undefined}
               value={start}
               onChange={(e) => setStart(e.target.value)}
             />
@@ -529,17 +627,24 @@ function Assignment({ d, annotators, L, run }) {
               id={`row-to-${d.id}`}
               name={`row-to-${d.id}`}
               min="1"
-              max={rows}
+              max={rowCount || undefined}
               value={end}
               onChange={(e) => setEnd(e.target.value)}
             />
           </label>
           <button
             className={btnClass(rowState)}
-            disabled={!annotators.length || rowState.status === "busy"}
+            disabled={
+              !annotators.length ||
+              !rowCount ||
+              rowCountLoading ||
+              rowState.status === "busy"
+            }
             onClick={assignRows}
           >
-            {rowState.status === "busy"
+            {rowCountLoading
+              ? L("Loading…")
+              : rowState.status === "busy"
               ? L("Assigning…")
               : rowState.status === "ok"
                 ? "✓ " + L("Assigned")
@@ -634,21 +739,49 @@ function assignedRows(d, username) {
     .map(({ start, end }) => ({ start, end }));
   if (rows.length) return rows;
   if ((d.assignees || (d.as ? [d.as] : [])).includes(username))
-    return [{ start: 1, end: documentLines(d.text).length }];
+    return [
+      {
+        start: 1,
+        end: d.rowCount || (d.text ? documentLines(d.text).length : null),
+      },
+    ];
   return [];
 }
 
+function annotationCount(doc) {
+  return doc.annCount ?? doc.anns?.length ?? null;
+}
+
+function annotationTotal(docs) {
+  const counts = docs.map(annotationCount);
+  return counts.some((count) => count === null)
+    ? "—"
+    : counts.reduce((total, count) => total + count, 0);
+}
+
 function Tasks() {
-  const { L, me, db, run, notify, qf, setQf, setCur, setTab } = useContext(C),
+  const {
+      L,
+      me,
+      db,
+      run,
+      notify,
+      qf,
+      setQf,
+      setCur,
+      setTab,
+      putDocDetail,
+    } = useContext(C),
     A = me.role === "admin",
     an = db.users.filter((u) => u.role === "annotator"),
-    ds = db.docs.filter((d) => !qf || (d.title + d.text).includes(qf)),
-    myDocs = db.docs.filter(
-      (d) =>
-        d.assignees?.includes(me.u) ||
-        d.as === me.u ||
-        d.rowAssignments?.some((assignment) => assignment.username === me.u),
-    );
+    ds = db.docs.filter((d) => !qf || d.title.includes(qf));
+  const [openingDoc, setOpeningDoc] = useState(null);
+  const myDocs = db.docs.filter(
+    (d) =>
+      d.assignees?.includes(me.u) ||
+      d.as === me.u ||
+      d.rowAssignments?.some((assignment) => assignment.username === me.u),
+  );
   return (
     <>
       {A && (
@@ -685,7 +818,9 @@ function Tasks() {
                               <b>{doc.title}</b>
                               {assignedRows(doc, u.u).map((range) => (
                                 <div key={`${range.start}-${range.end}`}>
-                                  {L("Rows")} {range.start}–{range.end}
+                                  {range.end
+                                    ? `${L("Rows")} ${range.start}–${range.end}`
+                                    : L("Full document")}
                                 </div>
                               ))}
                             </div>
@@ -695,7 +830,7 @@ function Tasks() {
                       <td>
                         {d.filter((x) => x.done).length}/{d.length}
                       </td>
-                      <td>{d.reduce((a, x) => a + x.anns.length, 0)}</td>
+                      <td>{annotationTotal(d)}</td>
                       <td>
                         {d.length
                           ? Math.round(
@@ -735,7 +870,9 @@ function Tasks() {
                           <b>{doc.title}</b>
                           {assignedRows(doc, me.u).map((range) => (
                             <div key={`${range.start}-${range.end}`}>
-                              {L("Rows")} {range.start}–{range.end}
+                              {range.end
+                                ? `${L("Rows")} ${range.start}–${range.end}`
+                                : L("Full document")}
                             </div>
                           ))}
                         </div>
@@ -745,10 +882,7 @@ function Tasks() {
                   <td>{myDocs.filter((d) => d.done).length}</td>
                   <td>{myDocs.filter((d) => !d.done).length}</td>
                   <td>
-                    {myDocs.reduce(
-                      (total, d) => total + (d.anns || []).length,
-                      0,
-                    )}
+                    {annotationTotal(myDocs)}
                   </td>
                   <td>
                     {myDocs.length
@@ -800,14 +934,31 @@ function Tasks() {
                     </>
                   )}
                 </td>
-                <td>{d.anns.length}</td>
+                <td>{annotationCount(d) ?? "—"}</td>
                 <td>
                   <button
                     className="open"
-                    onClick={() => {
-                      setCur(d.id);
-                      setTab("annotate");
-                      notify(`Opened: ${d.title}`, "info");
+                    disabled={openingDoc === d.id}
+                    onClick={async () => {
+                      setOpeningDoc(d.id);
+                      try {
+                        putDocDetail(
+                          await api(
+                            "GET",
+                            "/docs/" + encodeURIComponent(d.id),
+                          ),
+                        );
+                        setCur(d.id);
+                        setTab("annotate");
+                        notify(`Opened: ${d.title}`, "info");
+                      } catch (error) {
+                        notify(
+                          error.message || "Could not open document.",
+                          "danger",
+                        );
+                      } finally {
+                        setOpeningDoc(null);
+                      }
                     }}
                   >
                     {L("Open")}
@@ -854,6 +1005,8 @@ function Annotate() {
       run,
       load,
       setDb,
+      docDetails,
+      putDocDetail,
       notify,
       cur,
       act,
@@ -865,7 +1018,7 @@ function Annotate() {
     [lineIndex, setLineIndex] = useState(0),
     [lineInput, setLineInput] = useState("1"),
     [pending, setPending] = useState(null),
-    d = db.docs.find((x) => x.id === cur);
+    d = docDetails[cur];
   useEffect(() => {
     // Annotators start on the first row that was assigned to them.
     const mine = (d?.rowAssignments || []).filter((x) => x.username === me.u);
@@ -902,12 +1055,7 @@ function Annotate() {
       temp = { id: "tmp-" + Date.now(), s: start, e: end, l: label, by: me.u };
     setPending(null);
     getSelection()?.removeAllRanges();
-    setDb((old) => ({
-      ...old,
-      docs: old.docs.map((x) =>
-        x.id === docId ? { ...x, anns: [...x.anns, temp] } : x,
-      ),
-    }));
+    putDocDetail({ ...d, anns: [...d.anns, temp] });
     api("POST", "/docs/" + docId + "/anns", { start, end, label })
       .catch((e) => notify(e.message || "Could not save the entity.", "danger"))
       .finally(() => load(me.role));
@@ -1290,13 +1438,15 @@ function Annotate() {
 }
 
 function Data() {
-  const { L, me, db } = useContext(C),
+  const { L, me, db, docDetails } = useContext(C),
     A = me.role === "admin",
     [annotator, setAnnotator] = useState("all"),
     [rowIndex, setRowIndex] = useState(0),
     rows = [],
     cnt = {};
-  db.docs.forEach((d) =>
+  db.docs.forEach((metadata) => {
+    const d = docDetails[metadata.id];
+    if (!d) return;
     d.anns.forEach((n) => {
       const owner = n.by || d.as || "";
       if (
@@ -1306,8 +1456,8 @@ function Data() {
         return;
       rows.push([d, n]);
       cnt[n.l] = (cnt[n.l] || 0) + 1;
-    }),
-  );
+    });
+  });
   const currentIndex = Math.min(rowIndex, Math.max(0, rows.length - 1));
   const col = (n) => db.labels.find((l) => l.n === n)?.c || "#888";
   return (
@@ -1686,7 +1836,8 @@ function exportText(db, annotator = "all") {
   return JSON.stringify(records, null, 2);
 }
 function IO() {
-  const { L, db, load, me, setMsg } = useContext(C),
+  const { L, db, docDetails, load, loadAllDocDetails, me, setMsg } =
+    useContext(C),
     fileInput = useRef(null),
     [ta, setTa] = useState(""),
     [selectedFiles, setSelectedFiles] = useState([]),
@@ -1694,7 +1845,8 @@ function IO() {
     [importing, setImporting] = useState(false),
     [importProgress, setImportProgress] = useState(""),
     annotators = db.users.filter((u) => u.role === "annotator"),
-    exportDocs = db.docs.filter(
+    allDocs = db.docs.map((doc) => docDetails[doc.id] || doc),
+    exportDocs = allDocs.filter(
       (d) =>
         me.role !== "admin" ||
         exportAnnotator === "all" ||
@@ -1758,7 +1910,8 @@ function IO() {
         labels: labs,
         docs: items.filter((x) => x.text.trim()),
       });
-      await load(me.role);
+      const docs = await load(me.role);
+      await loadAllDocDetails(docs);
       setMsg("Imported " + r.count + " document(s).");
       if (name === "Pasted") setTa("");
     } catch (e) {
@@ -1800,7 +1953,8 @@ function IO() {
           chunks: index,
           title: f.name,
         });
-        await load(me.role);
+        const docs = await load(me.role);
+        await loadAllDocDetails(docs);
         setMsg("Imported " + r.count + " document(s).");
         continue;
       }

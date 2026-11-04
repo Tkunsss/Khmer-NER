@@ -406,19 +406,18 @@ async function handleApi(request, env, connection, body, user) {
   }
 
   if (method === "GET" && parts.length === 3 && parts[2] === "docs") {
-    const startedAt = performance.now();
     const docs = await execute(
       connection,
-      `select id,title,body,assignee,done,review,note from docs
+      `select id,title,assignee,done,review,note,
+              (select count(*) from anns x where x.doc_id=docs.id) as annCount
+       from docs
        ${isAdmin ? "" : "where exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=docs.id and ra.username=?)"} order by id`,
       isAdmin ? [] : [username, username, username],
     );
-    const docsAt = performance.now();
     const assignments = await execute(
       connection,
       "select doc_id,username from doc_assignments order by username",
     );
-    const assignmentsAt = performance.now();
     const assignedByDoc = new Map();
     for (const row of assignments.rows) {
       const key = String(row.doc_id);
@@ -431,7 +430,6 @@ async function handleApi(request, env, connection, body, user) {
        ${isAdmin ? "" : "where username=?"} order by doc_id,row_start`,
       isAdmin ? [] : [username],
     );
-    const rowAssignmentsAt = performance.now();
     const rowAssignmentsByDoc = new Map();
     for (const row of rowAssignments.rows) {
       const key = String(row.doc_id);
@@ -442,113 +440,124 @@ async function handleApi(request, env, connection, body, user) {
         end: row.end,
       });
     }
+    const result = docs.rows.map((doc) => {
+      const docId = String(doc.id);
+      const rowLimited = !isAdmin && rowAssignmentsByDoc.has(docId);
+      const assignees = [
+        ...new Set([
+          ...(assignedByDoc.get(docId) || []),
+          ...(doc.assignee ? [doc.assignee] : []),
+        ]),
+      ];
+      return {
+        id: docId,
+        title: doc.title,
+        assignees,
+        as: assignees.join(", "),
+        rowAssignments: rowAssignmentsByDoc.get(docId) || [],
+        annCount: rowLimited ? null : Number(doc.annCount),
+        done: !!doc.done,
+        review: doc.review,
+        note: doc.note,
+      };
+    });
+    return json(result);
+  }
+
+  if (method === "GET" && parts.length === 4 && parts[2] === "docs") {
+    const id = Number(parts[3]);
+    if (!Number.isSafeInteger(id) || id < 1) return err(400, "Invalid document.");
+    const doc = (
+      await execute(
+        connection,
+        `select id,title,body,assignee,done,review,note from docs
+         where id=? ${
+           isAdmin
+             ? ""
+             : "and (exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=docs.id and ra.username=?))"
+         }`,
+        isAdmin ? [id] : [id, username, username, username],
+      )
+    ).rows[0];
+    if (!doc) return err(404, "Document not found.");
+
+    const assignments = await execute(
+      connection,
+      "select username from doc_assignments where doc_id=? order by username",
+      [id],
+    );
+    const assignees = [
+      ...new Set([
+        ...assignments.rows.map((row) => row.username),
+        ...(doc.assignee ? [doc.assignee] : []),
+      ]),
+    ];
+    const rowAssignments = await execute(
+      connection,
+      `select username,row_start as start,row_end as end from row_assignments
+       where doc_id=? ${isAdmin ? "" : "and username=?"} order by row_start`,
+      isAdmin ? [id] : [id, username],
+    );
+    const assignedRows = rowAssignments.rows;
     const annotations = await execute(
       connection,
-      `select x.id,x.doc_id,x.s,x.e,x.label l,x.author \`by\`
-       from anns x join docs d on d.id=x.doc_id
-       ${isAdmin ? "" : "where (exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?) or d.assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=d.id and ra.username=?))"} order by x.s`,
-      isAdmin ? [] : [username, username, username],
+      "select id,s,e,label l,author `by` from anns where doc_id=? order by s",
+      [id],
     );
-    const annotationsAt = performance.now();
-    const annsByDoc = new Map();
-    const docsById = new Map(
-      docs.rows.map((doc) => [String(doc.id), doc]),
-    );
-    for (const annotation of annotations.rows) {
-      const key = String(annotation.doc_id);
-      if (!annsByDoc.has(key)) annsByDoc.set(key, []);
-      annsByDoc.get(key).push({
+    let visibleAnnotations = annotations.rows;
+    if (!isAdmin) {
+      const fullAccess =
+        !assignedRows.length &&
+        (doc.assignee === username ||
+          assignments.rows.some((row) => row.username === username));
+      if (!fullAccess) {
+        let position = 0;
+        let row = 1;
+        let assignmentIndex = 0;
+        visibleAnnotations = [];
+        for (const annotation of annotations.rows) {
+          while (position < annotation.s) {
+            if (doc.body[position] === "\r") {
+              row++;
+              if (doc.body[position + 1] === "\n") position++;
+            } else if (doc.body[position] === "\n") {
+              row++;
+            }
+            position++;
+          }
+          while (
+            assignmentIndex < assignedRows.length &&
+            assignedRows[assignmentIndex].end < row
+          )
+            assignmentIndex++;
+          const assignment = assignedRows[assignmentIndex];
+          if (assignment && row >= assignment.start && row <= assignment.end)
+            visibleAnnotations.push(annotation);
+        }
+      }
+    }
+
+    return json({
+      id: String(doc.id),
+      title: doc.title,
+      text:
+        !isAdmin && assignedRows.length
+          ? maskUnassignedRows(doc.body, assignedRows)
+          : doc.body,
+      assignees,
+      as: assignees.join(", "),
+      rowAssignments: assignedRows,
+      rowCount: doc.body.split(/\r\n|\r|\n/).length,
+      done: !!doc.done,
+      review: doc.review,
+      note: doc.note,
+      anns: visibleAnnotations.map((annotation) => ({
         id: String(annotation.id),
         s: annotation.s,
         e: annotation.e,
         l: annotation.l,
         by: annotation.by,
-      });
-    }
-    if (!isAdmin) {
-      for (const [docId, anns] of annsByDoc) {
-        const doc = docsById.get(docId);
-        const assignedRows = rowAssignmentsByDoc.get(docId) || [];
-        const fullAccess =
-          !assignedRows.length &&
-          (doc.assignee === username ||
-            (assignedByDoc.get(docId) || []).includes(username));
-        if (!fullAccess) {
-          let position = 0;
-          let row = 1;
-          let assignmentIndex = 0;
-          const visibleAnnotations = [];
-          for (const annotation of anns) {
-            while (position < annotation.s) {
-              if (doc.body[position] === "\r") {
-                row++;
-                if (doc.body[position + 1] === "\n") position++;
-              } else if (doc.body[position] === "\n") row++;
-              position++;
-            }
-            while (
-              assignmentIndex < assignedRows.length &&
-              assignedRows[assignmentIndex].end < row
-            )
-              assignmentIndex++;
-            const assignment = assignedRows[assignmentIndex];
-            if (assignment && row >= assignment.start && row <= assignment.end)
-              visibleAnnotations.push(annotation);
-          }
-          annsByDoc.set(docId, visibleAnnotations);
-        }
-      }
-    }
-    let totalChars = 0;
-    const result = docs.rows.map((doc) => {
-      totalChars += doc.body.length;
-      const assignees = [
-        ...new Set([
-          ...(assignedByDoc.get(String(doc.id)) || []),
-          ...(doc.assignee ? [doc.assignee] : []),
-        ]),
-      ];
-      return {
-        id: String(doc.id),
-        title: doc.title,
-        text:
-          !isAdmin && rowAssignmentsByDoc.has(String(doc.id))
-            ? maskUnassignedRows(
-                doc.body,
-                (rowAssignmentsByDoc.get(String(doc.id)) || []).filter(
-                  (assignment) => assignment.username === username,
-                ),
-              )
-            : doc.body,
-        assignees,
-        as: assignees.join(", "),
-        rowAssignments: rowAssignmentsByDoc.get(String(doc.id)) || [],
-        done: !!doc.done,
-        review: doc.review,
-        note: doc.note,
-        anns: annsByDoc.get(String(doc.id)) || [],
-      };
-    });
-    const processedAt = performance.now();
-    const serialized = JSON.stringify(result);
-    const responseBody = encoder.encode(serialized);
-    const serializedAt = performance.now();
-    const responseBytes = responseBody.byteLength;
-    console.log("api/docs phases", {
-      dbDocsMs: Math.round(docsAt - startedAt),
-      dbAssignmentsMs: Math.round(assignmentsAt - docsAt),
-      dbRowAssignmentsMs: Math.round(rowAssignmentsAt - assignmentsAt),
-      dbAnnotationsMs: Math.round(annotationsAt - rowAssignmentsAt),
-      processingMs: Math.round(processedAt - annotationsAt),
-      serializeMs: Math.round(serializedAt - processedAt),
-      docCount: docs.rows.length,
-      annCount: annotations.rows.length,
-      totalChars,
-      responseBytes,
-      isAdmin,
-    });
-    return new Response(responseBody, {
-      headers: { "content-type": "application/json; charset=utf-8" },
+      })),
     });
   }
 

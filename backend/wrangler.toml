@@ -4,6 +4,9 @@ compatibility_date = "2026-11-03"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
+[observability]
+enabled = true
+
 [[hyperdrive]]
 binding = "HYPERDRIVE"
 id = "88e708bf169d40b1825d4e808c2c0224"

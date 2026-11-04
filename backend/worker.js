@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { hashPassword, isLegacyBcrypt, verifyPassword } from "./auth.js";
 import { createConnection } from "mysql2/promise";
 
 const API_WINDOW_MS = 15 * 60 * 1000;
@@ -9,6 +10,9 @@ const apiHits = new Map();
 const loginHits = new Map();
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+const errorCode = (error) =>
+  typeof error?.code === "string" ? error.code : "UNKNOWN";
 
 const json = (body, status = 200, headers = {}) =>
   new Response(JSON.stringify(body), {
@@ -249,11 +253,22 @@ async function handleApi(request, env, connection, body, user) {
       [username],
     );
     const current = result.rows[0];
-    if (!current || !(await bcrypt.compare(old || "", current.pass)))
+    const currentPassword = typeof old === "string" ? old : "";
+    let currentPasswordValid =
+      current && (await verifyPassword(currentPassword, current.pass));
+    if (
+      !currentPasswordValid &&
+      current &&
+      isLegacyBcrypt(current.pass)
+    ) {
+      currentPasswordValid = await bcrypt.compare(currentPassword, current.pass);
+    }
+    if (!currentPasswordValid)
       return err(400, "Current password is wrong.");
-    if (!nw || nw.length < 8) return err(400, "Use at least 8 characters.");
+    if (typeof nw !== "string" || nw.length < 8)
+      return err(400, "Use at least 8 characters.");
     await execute(connection, "update users set pass=? where username=?", [
-      await bcrypt.hash(nw, 10),
+      await hashPassword(nw),
       username,
     ]);
     return json({ ok: 1 });
@@ -326,7 +341,7 @@ async function handleApi(request, env, connection, body, user) {
       const { u, p, role } = body || {};
       if (
         !/^[\w.-]{3,32}$/.test(u || "") ||
-        !p ||
+        typeof p !== "string" ||
         p.length < 8 ||
         !["admin", "annotator"].includes(role)
       )
@@ -338,7 +353,7 @@ async function handleApi(request, env, connection, body, user) {
         await execute(
           connection,
           "insert into users(username,pass,user_role) values(?,?,?)",
-          [u, await bcrypt.hash(p, 10), role],
+          [u, await hashPassword(p), role],
         );
         return json({ ok: 1 });
       } catch (error) {
@@ -391,16 +406,19 @@ async function handleApi(request, env, connection, body, user) {
   }
 
   if (method === "GET" && parts.length === 3 && parts[2] === "docs") {
+    const startedAt = performance.now();
     const docs = await execute(
       connection,
       `select id,title,body,assignee,done,review,note from docs
        ${isAdmin ? "" : "where exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=docs.id and ra.username=?)"} order by id`,
       isAdmin ? [] : [username, username, username],
     );
+    const docsAt = performance.now();
     const assignments = await execute(
       connection,
       "select doc_id,username from doc_assignments order by username",
     );
+    const assignmentsAt = performance.now();
     const assignedByDoc = new Map();
     for (const row of assignments.rows) {
       const key = String(row.doc_id);
@@ -413,6 +431,7 @@ async function handleApi(request, env, connection, body, user) {
        ${isAdmin ? "" : "where username=?"} order by doc_id,row_start`,
       isAdmin ? [] : [username],
     );
+    const rowAssignmentsAt = performance.now();
     const rowAssignmentsByDoc = new Map();
     for (const row of rowAssignments.rows) {
       const key = String(row.doc_id);
@@ -430,6 +449,7 @@ async function handleApi(request, env, connection, body, user) {
        ${isAdmin ? "" : "where (exists(select 1 from doc_assignments da where da.doc_id=d.id and da.username=?) or d.assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=d.id and ra.username=?))"} order by x.s`,
       isAdmin ? [] : [username, username, username],
     );
+    const annotationsAt = performance.now();
     const annsByDoc = new Map();
     const docsById = new Map(
       docs.rows.map((doc) => [String(doc.id), doc]),
@@ -479,36 +499,57 @@ async function handleApi(request, env, connection, body, user) {
         }
       }
     }
-    return json(
-      docs.rows.map((doc) => {
-        const assignees = [
-          ...new Set([
-            ...(assignedByDoc.get(String(doc.id)) || []),
-            ...(doc.assignee ? [doc.assignee] : []),
-          ]),
-        ];
-        return {
-          id: String(doc.id),
-          title: doc.title,
-          text:
-            !isAdmin && rowAssignmentsByDoc.has(String(doc.id))
-              ? maskUnassignedRows(
-                  doc.body,
-                  (rowAssignmentsByDoc.get(String(doc.id)) || []).filter(
-                    (assignment) => assignment.username === username,
-                  ),
-                )
-              : doc.body,
-          assignees,
-          as: assignees.join(", "),
-          rowAssignments: rowAssignmentsByDoc.get(String(doc.id)) || [],
-          done: !!doc.done,
-          review: doc.review,
-          note: doc.note,
-          anns: annsByDoc.get(String(doc.id)) || [],
-        };
-      }),
-    );
+    let totalChars = 0;
+    const result = docs.rows.map((doc) => {
+      totalChars += doc.body.length;
+      const assignees = [
+        ...new Set([
+          ...(assignedByDoc.get(String(doc.id)) || []),
+          ...(doc.assignee ? [doc.assignee] : []),
+        ]),
+      ];
+      return {
+        id: String(doc.id),
+        title: doc.title,
+        text:
+          !isAdmin && rowAssignmentsByDoc.has(String(doc.id))
+            ? maskUnassignedRows(
+                doc.body,
+                (rowAssignmentsByDoc.get(String(doc.id)) || []).filter(
+                  (assignment) => assignment.username === username,
+                ),
+              )
+            : doc.body,
+        assignees,
+        as: assignees.join(", "),
+        rowAssignments: rowAssignmentsByDoc.get(String(doc.id)) || [],
+        done: !!doc.done,
+        review: doc.review,
+        note: doc.note,
+        anns: annsByDoc.get(String(doc.id)) || [],
+      };
+    });
+    const processedAt = performance.now();
+    const serialized = JSON.stringify(result);
+    const responseBody = encoder.encode(serialized);
+    const serializedAt = performance.now();
+    const responseBytes = responseBody.byteLength;
+    console.log("api/docs phases", {
+      dbDocsMs: Math.round(docsAt - startedAt),
+      dbAssignmentsMs: Math.round(assignmentsAt - docsAt),
+      dbRowAssignmentsMs: Math.round(rowAssignmentsAt - assignmentsAt),
+      dbAnnotationsMs: Math.round(annotationsAt - rowAssignmentsAt),
+      processingMs: Math.round(processedAt - annotationsAt),
+      serializeMs: Math.round(serializedAt - processedAt),
+      docCount: docs.rows.length,
+      annCount: annotations.rows.length,
+      totalChars,
+      responseBytes,
+      isAdmin,
+    });
+    return new Response(responseBody, {
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
   }
 
   if (method === "PATCH" && parts.length === 4 && parts[2] === "docs") {
@@ -902,12 +943,16 @@ async function handleApi(request, env, connection, body, user) {
       try {
         await connection.rollback();
       } catch (rollbackError) {
-        console.error("Failed to roll back import transaction", rollbackError);
+        console.error("Failed to roll back import transaction", {
+          code: errorCode(rollbackError),
+        });
       }
       try {
         await deleteImportChunks(connection, uploadId, username);
       } catch (cleanupError) {
-        console.error("Failed to clean up chunks after import failure", cleanupError);
+        console.error("Failed to clean up chunks after import failure", {
+          code: errorCode(cleanupError),
+        });
       }
       throw error;
     }
@@ -1048,7 +1093,7 @@ export default {
         return withHeaders(json({ status: "ok" }));
       } catch (error) {
         console.error("Database health check failed", {
-          code: typeof error?.code === "string" ? error.code : "UNKNOWN",
+          code: errorCode(error),
         });
         return withHeaders(err(503, "Database connection unavailable."));
       } finally {
@@ -1057,7 +1102,7 @@ export default {
             await connection.end();
           } catch (error) {
             console.error("Failed to close health-check connection", {
-              code: typeof error?.code === "string" ? error.code : "UNKNOWN",
+              code: errorCode(error),
             });
           }
         }
@@ -1125,7 +1170,23 @@ export default {
           [u],
         );
         const record = result.rows[0];
-        if (!record || !(await bcrypt.compare(p || "", record.pass))) {
+        const password = typeof p === "string" ? p : "";
+        let valid = record && (await verifyPassword(password, record.pass));
+        if (!valid && record && isLegacyBcrypt(record.pass)) {
+          valid = await bcrypt.compare(password, record.pass);
+          if (valid) {
+            await execute(
+              connection,
+              "update users set pass=? where username=? and pass=?",
+              [
+                await hashPassword(password),
+                record.username,
+                record.pass,
+              ],
+            );
+          }
+        }
+        if (!valid) {
           recent.push(now);
           loginHits.set(ip, recent);
           return withHeaders(err(401, "Wrong username or password."));
@@ -1133,21 +1194,23 @@ export default {
         const response = json(
           {
             user: { u: record.username, role: record.role },
-            weak: p === "admin123" || p.length < 8,
+            weak: password === "admin123" || password.length < 8,
           },
           200,
           cookieHeaders(await signToken(record.username, env.JWT_SECRET)),
         );
         return withHeaders(response);
       } catch (error) {
-        console.error(error);
+        console.error("Login request failed", { code: errorCode(error) });
         return withHeaders(err(500, "Server error"));
       } finally {
         if (connection) {
           try {
             await connection.end();
           } catch (error) {
-            console.error("Failed to close Hyperdrive connection", error);
+            console.error("Failed to close Hyperdrive connection", {
+              code: errorCode(error),
+            });
           }
         }
       }
@@ -1195,14 +1258,16 @@ export default {
       );
       return withHeaders(response);
     } catch (error) {
-      console.error(error);
+      console.error("API request failed", { code: errorCode(error) });
       return withHeaders(err(500, "Server error"));
     } finally {
       if (connection) {
         try {
           await connection.end();
         } catch (error) {
-          console.error("Failed to close Hyperdrive connection", error);
+          console.error("Failed to close Hyperdrive connection", {
+            code: errorCode(error),
+          });
         }
       }
     }

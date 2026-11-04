@@ -224,6 +224,21 @@ button.p,
   align-items: center;
   margin-bottom: 8px;
 }
+.import-actions {
+  align-items: center;
+}
+.import-progress {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 .tw {
   overflow: auto;
   max-height: 70vh;
@@ -378,12 +393,15 @@ button.danger:hover:not(:disabled) {
 /* Pop-up messages */
 .toasts {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
+  top: calc(env(safe-area-inset-top, 0px) + 16px);
+  right: auto;
+  bottom: auto;
+  left: 50%;
   z-index: 1000;
   display: grid;
   gap: 8px;
   max-width: min(420px, calc(100vw - 32px));
+  transform: translateX(-50%);
 }
 .toast {
   display: flex;

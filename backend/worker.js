@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { hashPassword, isLegacyBcrypt, verifyPassword } from "./auth.js";
 import { createConnection } from "mysql2/promise";
 
 const API_WINDOW_MS = 15 * 60 * 1000;
@@ -252,11 +253,22 @@ async function handleApi(request, env, connection, body, user) {
       [username],
     );
     const current = result.rows[0];
-    if (!current || !(await bcrypt.compare(old || "", current.pass)))
+    const currentPassword = typeof old === "string" ? old : "";
+    let currentPasswordValid =
+      current && (await verifyPassword(currentPassword, current.pass));
+    if (
+      !currentPasswordValid &&
+      current &&
+      isLegacyBcrypt(current.pass)
+    ) {
+      currentPasswordValid = await bcrypt.compare(currentPassword, current.pass);
+    }
+    if (!currentPasswordValid)
       return err(400, "Current password is wrong.");
-    if (!nw || nw.length < 8) return err(400, "Use at least 8 characters.");
+    if (typeof nw !== "string" || nw.length < 8)
+      return err(400, "Use at least 8 characters.");
     await execute(connection, "update users set pass=? where username=?", [
-      await bcrypt.hash(nw, 10),
+      await hashPassword(nw),
       username,
     ]);
     return json({ ok: 1 });
@@ -329,7 +341,7 @@ async function handleApi(request, env, connection, body, user) {
       const { u, p, role } = body || {};
       if (
         !/^[\w.-]{3,32}$/.test(u || "") ||
-        !p ||
+        typeof p !== "string" ||
         p.length < 8 ||
         !["admin", "annotator"].includes(role)
       )
@@ -341,7 +353,7 @@ async function handleApi(request, env, connection, body, user) {
         await execute(
           connection,
           "insert into users(username,pass,user_role) values(?,?,?)",
-          [u, await bcrypt.hash(p, 10), role],
+          [u, await hashPassword(p), role],
         );
         return json({ ok: 1 });
       } catch (error) {
@@ -1158,7 +1170,23 @@ export default {
           [u],
         );
         const record = result.rows[0];
-        if (!record || !(await bcrypt.compare(p || "", record.pass))) {
+        const password = typeof p === "string" ? p : "";
+        let valid = record && (await verifyPassword(password, record.pass));
+        if (!valid && record && isLegacyBcrypt(record.pass)) {
+          valid = await bcrypt.compare(password, record.pass);
+          if (valid) {
+            await execute(
+              connection,
+              "update users set pass=? where username=? and pass=?",
+              [
+                await hashPassword(password),
+                record.username,
+                record.pass,
+              ],
+            );
+          }
+        }
+        if (!valid) {
           recent.push(now);
           loginHits.set(ip, recent);
           return withHeaders(err(401, "Wrong username or password."));
@@ -1166,7 +1194,7 @@ export default {
         const response = json(
           {
             user: { u: record.username, role: record.role },
-            weak: p === "admin123" || p.length < 8,
+            weak: password === "admin123" || password.length < 8,
           },
           200,
           cookieHeaders(await signToken(record.username, env.JWT_SECRET)),

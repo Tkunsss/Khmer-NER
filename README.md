@@ -208,16 +208,19 @@ The Worker retains the existing `/health` endpoint and the `/api` routes for
 login/logout/current user/password, users, labels, documents and assignments,
 annotations, and JSON/chunked imports. Chunked imports are assembled inside
 MySQL so large uploads do not need to be copied through the Worker runtime.
-JWTs remain HS256 tokens in the `sid` cookie; password hashes continue using
-`bcryptjs`, so stored hashes are compatible. The Worker re-reads the current
-user role from MySQL on authenticated requests, as the existing backend does.
+JWTs remain HS256 tokens in the `sid` cookie. The Worker stores new passwords
+as PBKDF2-HMAC-SHA-256 hashes and upgrades a legacy bcrypt hash after a
+successful login. The Express server continues using `bcryptjs`. The Worker
+re-reads the current user role from MySQL on authenticated requests, as the
+existing backend does.
 
 Compatibility review of the locked backend packages:
 
 - `mysql2` 3.24.6 is compatible with Hyperdrive ([Cloudflare documents
   3.13.0+ support](https://developers.cloudflare.com/hyperdrive/examples/connect-to-mysql/));
   the Worker sets `disableEval: true`.
-- `bcryptjs` 2.4.3 is pure JavaScript and is retained for existing hashes.
+- `bcryptjs` 2.4.3 remains installed for the Express server and for legacy
+  Worker hash compatibility during login and password changes.
 - Express, `cookie-parser`, `express-rate-limit`, Helmet, `jsonwebtoken`, and
   `dotenv` stay in the package for the untouched Render entry point. The
   Worker does not use them: request handling uses the Workers Fetch API,

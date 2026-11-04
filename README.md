@@ -44,6 +44,11 @@ approved schema setup. The Worker does not change `backend/server.js`,
    `backend/wrangler.toml` as the `HYPERDRIVE` binding. If you recreate the
    configuration, replace that ID with the new one.
 
+The Worker configuration enables persisted observability logs and requires
+Wrangler 4.134.0 or later. Deploy the Worker with `npx wrangler deploy` after
+changing this setting; logs are not available retroactively. Error logs include
+only error codes, not raw database error objects.
+
 The Worker uses the Hyperdrive binding properties and `mysql2`'s documented
 Workers compatibility option (`disableEval: true`). No database URI or
 credential is stored in the repository. Hyperdrive handles TLS to Aiven; the

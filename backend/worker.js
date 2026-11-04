@@ -10,6 +10,9 @@ const loginHits = new Map();
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+const errorCode = (error) =>
+  typeof error?.code === "string" ? error.code : "UNKNOWN";
+
 const json = (body, status = 200, headers = {}) =>
   new Response(JSON.stringify(body), {
     status,
@@ -902,12 +905,16 @@ async function handleApi(request, env, connection, body, user) {
       try {
         await connection.rollback();
       } catch (rollbackError) {
-        console.error("Failed to roll back import transaction", rollbackError);
+        console.error("Failed to roll back import transaction", {
+          code: errorCode(rollbackError),
+        });
       }
       try {
         await deleteImportChunks(connection, uploadId, username);
       } catch (cleanupError) {
-        console.error("Failed to clean up chunks after import failure", cleanupError);
+        console.error("Failed to clean up chunks after import failure", {
+          code: errorCode(cleanupError),
+        });
       }
       throw error;
     }
@@ -1048,7 +1055,7 @@ export default {
         return withHeaders(json({ status: "ok" }));
       } catch (error) {
         console.error("Database health check failed", {
-          code: typeof error?.code === "string" ? error.code : "UNKNOWN",
+          code: errorCode(error),
         });
         return withHeaders(err(503, "Database connection unavailable."));
       } finally {
@@ -1057,7 +1064,7 @@ export default {
             await connection.end();
           } catch (error) {
             console.error("Failed to close health-check connection", {
-              code: typeof error?.code === "string" ? error.code : "UNKNOWN",
+              code: errorCode(error),
             });
           }
         }
@@ -1140,14 +1147,16 @@ export default {
         );
         return withHeaders(response);
       } catch (error) {
-        console.error(error);
+        console.error("Login request failed", { code: errorCode(error) });
         return withHeaders(err(500, "Server error"));
       } finally {
         if (connection) {
           try {
             await connection.end();
           } catch (error) {
-            console.error("Failed to close Hyperdrive connection", error);
+            console.error("Failed to close Hyperdrive connection", {
+              code: errorCode(error),
+            });
           }
         }
       }
@@ -1195,14 +1204,16 @@ export default {
       );
       return withHeaders(response);
     } catch (error) {
-      console.error(error);
+      console.error("API request failed", { code: errorCode(error) });
       return withHeaders(err(500, "Server error"));
     } finally {
       if (connection) {
         try {
           await connection.end();
         } catch (error) {
-          console.error("Failed to close Hyperdrive connection", error);
+          console.error("Failed to close Hyperdrive connection", {
+            code: errorCode(error),
+          });
         }
       }
     }

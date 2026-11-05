@@ -73,6 +73,14 @@ export default function App() {
     docDetailsRef.current = next;
     setDocDetails(next);
   };
+  const updateDocDetail = (id, update) => {
+    const current = docDetailsRef.current[id];
+    if (!current) return;
+    const detail = update(current);
+    const next = { ...docDetailsRef.current, [id]: detail };
+    docDetailsRef.current = next;
+    setDocDetails(next);
+  };
   const loadAllDocDetails = async (documents = db.docs) => {
     const missing = documents.filter(
       (doc) => !docDetailsRef.current[doc.id],
@@ -186,6 +194,7 @@ export default function App() {
     setWeak,
     docDetails,
     putDocDetail,
+    updateDocDetail,
     loadAllDocDetails,
   };
   if (!me)
@@ -1056,11 +1065,9 @@ function Annotate() {
       L,
       me,
       db,
-      run,
-      load,
       setDb,
       docDetails,
-      putDocDetail,
+      updateDocDetail,
       notify,
       cur,
       act,
@@ -1087,16 +1094,47 @@ function Annotate() {
   const undo = () => {
     if (!d) return;
     const m = d.anns.filter((n) => n.by === me.u);
-    if (m.length)
-      run(
-        () =>
-          api(
-            "DELETE",
-            "/anns/" + m.reduce((a, b) => (+b.id > +a.id ? b : a)).id,
-          ),
-        { ok: "Undo: last entity removed", kind: "danger" },
-      );
-    else notify("Nothing to undo.", "info");
+    if (!m.length) {
+      notify("Nothing to undo.", "info");
+      return;
+    }
+    removeAnnotation(
+      m.reduce((a, b) => (+b.id > +a.id ? b : a)),
+      "Undo: last entity removed",
+    );
+  };
+  const adjustAnnotationCount = (amount) =>
+    setDb((current) => ({
+      ...current,
+      docs: current.docs.map((doc) =>
+        doc.id === d.id && typeof doc.annCount === "number"
+          ? { ...doc, annCount: Math.max(0, doc.annCount + amount) }
+          : doc,
+      ),
+    }));
+  const removeAnnotation = async (annotation, message) => {
+    if (String(annotation.id).startsWith("tmp-")) {
+      updateDocDetail(d.id, (current) => ({
+        ...current,
+        anns: current.anns.filter((item) => item.id !== annotation.id),
+      }));
+      return;
+    }
+    updateDocDetail(d.id, (current) => ({
+      ...current,
+      anns: current.anns.filter((item) => item.id !== annotation.id),
+    }));
+    try {
+      await api("DELETE", "/anns/" + annotation.id);
+      adjustAnnotationCount(-1);
+      if (message) notify(message, "danger");
+    } catch (error) {
+      updateDocDetail(d.id, (current) => ({
+        ...current,
+        anns: [...current.anns, annotation].sort((a, b) => a.s - b.s),
+      }));
+      notify(error.message || "Could not remove the entity.", "danger");
+    }
   };
   const chooseLabel = (label) => {
     if (!pending) {
@@ -1109,10 +1147,38 @@ function Annotate() {
       temp = { id: "tmp-" + Date.now(), s: start, e: end, l: label, by: me.u };
     setPending(null);
     getSelection()?.removeAllRanges();
-    putDocDetail({ ...d, anns: [...d.anns, temp] });
+    updateDocDetail(d.id, (current) => ({
+      ...current,
+      anns: [...current.anns, temp],
+    }));
     api("POST", "/docs/" + docId + "/anns", { start, end, label })
-      .catch((e) => notify(e.message || "Could not save the entity.", "danger"))
-      .finally(() => load(me.role));
+      .then((result) => {
+        updateDocDetail(docId, (current) => ({
+          ...current,
+          anns: current.anns.map((annotation) =>
+            annotation.id === temp.id
+              ? { ...annotation, id: String(result.id) }
+              : annotation,
+          ),
+        }));
+        setDb((current) => ({
+          ...current,
+          docs: current.docs.map((doc) =>
+            doc.id === docId && typeof doc.annCount === "number"
+              ? { ...doc, annCount: doc.annCount + 1 }
+              : doc,
+          ),
+        }));
+      })
+      .catch((error) => {
+        updateDocDetail(docId, (current) => ({
+          ...current,
+          anns: current.anns.filter(
+            (annotation) => annotation.id !== temp.id,
+          ),
+        }));
+        notify(error.message || "Could not save the entity.", "danger");
+      });
   };
   useEffect(() => {
     const k = (e) => {
@@ -1447,11 +1513,33 @@ function Annotate() {
                     id={"ann-label-" + n.id}
                     name={"ann-label-" + n.id}
                     value={n.l}
-                    onChange={(e) => {
+                    onChange={async (e) => {
                       const label = e.target.value;
-                      run(() => api("PATCH", "/anns/" + n.id, { label }), {
-                        ok: `Label changed to ${label}`,
-                      });
+                      updateDocDetail(d.id, (current) => ({
+                        ...current,
+                        anns: current.anns.map((annotation) =>
+                          annotation.id === n.id
+                            ? { ...annotation, l: label }
+                            : annotation,
+                        ),
+                      }));
+                      try {
+                        await api("PATCH", "/anns/" + n.id, { label });
+                        notify(`Label changed to ${label}`, "ok");
+                      } catch (error) {
+                        updateDocDetail(d.id, (current) => ({
+                          ...current,
+                          anns: current.anns.map((annotation) =>
+                            annotation.id === n.id
+                              ? { ...annotation, l: n.l }
+                              : annotation,
+                          ),
+                        }));
+                        notify(
+                          error.message || "Could not change entity label.",
+                          "danger",
+                        );
+                      }
                     }}
                   >
                     {db.labels.map((l) => (
@@ -1465,11 +1553,12 @@ function Annotate() {
                 <td>
                   <button
                     className="danger"
+                    disabled={String(n.id).startsWith("tmp-")}
                     onClick={() =>
-                      run(() => api("DELETE", "/anns/" + n.id), {
-                        ok: `Entity removed: "${d.text.slice(n.s, n.e)}"`,
-                        kind: "danger",
-                      })
+                      removeAnnotation(
+                        n,
+                        `Entity removed: "${d.text.slice(n.s, n.e)}"`,
+                      )
                     }
                   >
                     {L("Remove")}

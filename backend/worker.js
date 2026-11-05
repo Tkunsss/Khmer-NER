@@ -846,12 +846,12 @@ async function handleApi(request, env, connection, body, user) {
     )
       return err(409, "That text overlaps an existing entity. Remove it first.");
     try {
-      await execute(
+      const inserted = await execute(
         connection,
         "insert into anns(doc_id,s,e,label,author) values(?,?,?,?,?)",
         [id, startOffset, endOffset, label, username],
       );
-      return json({ ok: 1 });
+      return json({ ok: 1, id: String(inserted.insertId) });
     } catch (error) {
       if (error.code === "ER_NO_REFERENCED_ROW_2") return err(400, "Unknown label.");
       throw error;

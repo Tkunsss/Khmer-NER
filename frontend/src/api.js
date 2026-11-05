@@ -13,7 +13,7 @@ export async function api(m, p, b) {
   }
   const r = await fetch("/api" + p, {
     method: m,
-    credentials: "same-origin",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       "X-Requested-With": "khner",

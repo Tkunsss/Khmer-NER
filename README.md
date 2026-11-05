@@ -208,11 +208,12 @@ The Worker retains the existing `/health` endpoint and the `/api` routes for
 login/logout/current user/password, users, labels, documents and assignments,
 annotations, and JSON/chunked imports. Chunked imports are assembled inside
 MySQL so large uploads do not need to be copied through the Worker runtime.
-JWTs remain HS256 tokens in the `sid` cookie. The Worker stores new passwords
-as PBKDF2-HMAC-SHA-256 hashes and upgrades a legacy bcrypt hash after a
-successful login. The Express server continues using `bcryptjs`. The Worker
-re-reads the current user role from MySQL on authenticated requests, as the
-existing backend does.
+JWTs remain HS256 tokens in the `sid` cookie. The Worker stores new and changed
+passwords as PBKDF2-HMAC-SHA-256 hashes and continues to verify existing bcrypt
+hashes at login. Legacy hashes are upgraded when the user changes their
+password, rather than during login. The Express server continues using
+`bcryptjs`. The Worker re-reads the current user role from MySQL on
+authenticated requests, as the existing backend does.
 
 Compatibility review of the locked backend packages:
 

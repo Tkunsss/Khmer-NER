@@ -1187,18 +1187,6 @@ export default {
         if (!valid && record && isLegacyBcrypt(record.pass)) {
           loginStage = "legacy password verification";
           valid = await bcrypt.compare(password, record.pass);
-          if (valid) {
-            loginStage = "legacy password migration";
-            await execute(
-              connection,
-              "update users set pass=? where username=? and pass=?",
-              [
-                await hashPassword(password),
-                record.username,
-                record.pass,
-              ],
-            );
-          }
         }
         if (!valid) {
           recent.push(now);

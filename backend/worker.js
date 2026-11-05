@@ -156,10 +156,13 @@ function maskUnassignedRows(text, assignments) {
     }
   };
   while (position < text.length) {
-    let lineEnd = text.indexOf("\n", position);
-    const crEnd = text.indexOf("\r", position);
-    if (lineEnd < 0 || (crEnd >= 0 && crEnd < lineEnd)) lineEnd = crEnd;
-    if (lineEnd < 0) lineEnd = text.length;
+    let lineEnd = position;
+    while (
+      lineEnd < text.length &&
+      text[lineEnd] !== "\n" &&
+      text[lineEnd] !== "\r"
+    )
+      lineEnd++;
 
     while (
       assignmentIndex < assignments.length &&

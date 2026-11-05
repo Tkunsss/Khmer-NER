@@ -1,4 +1,11 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { api } from "./api.js";
 import { KM, snap, setSnap } from "./lib.js";
 const C = createContext(),
@@ -29,6 +36,7 @@ export default function App() {
     [cur, setCur] = useState(null),
     [act, setAct] = useState(null),
     [weak, setWeak] = useState(false);
+  const [loadingDoc, setLoadingDoc] = useState(null);
   const [docDetails, setDocDetails] = useState({});
   const docDetailsRef = useRef(docDetails);
   const [qf, setQf] = useState(""),
@@ -187,6 +195,8 @@ export default function App() {
     setTab,
     act,
     setAct,
+    loadingDoc,
+    setLoadingDoc,
     qf,
     setQf,
     snapOn,
@@ -261,6 +271,7 @@ export default function App() {
             <button
               key={x[0]}
               className={tab === x[0] ? "on" : ""}
+              disabled={loadingDoc !== null}
               onClick={() => {
                 setMsg("");
                 setTab(x[0]);
@@ -817,6 +828,7 @@ function Tasks() {
       setDb,
       setCur,
       setTab,
+      setLoadingDoc,
       putDocDetail,
     } = useContext(C),
     A = me.role === "admin",
@@ -987,9 +999,12 @@ function Tasks() {
                 <td>
                   <button
                     className="open"
-                    disabled={openingDoc === d.id}
+                    disabled={openingDoc !== null}
                     onClick={async () => {
                       setOpeningDoc(d.id);
+                      setCur(d.id);
+                      setTab("annotate");
+                      setLoadingDoc(d.id);
                       try {
                         putDocDetail(
                           await api(
@@ -997,16 +1012,17 @@ function Tasks() {
                             "/docs/" + encodeURIComponent(d.id),
                           ),
                         );
-                        setCur(d.id);
-                        setTab("annotate");
                         notify(`Opened: ${d.title}`, "info");
                       } catch (error) {
+                        setCur(null);
+                        setTab("tasks");
                         notify(
                           error.message || "Could not open document.",
                           "danger",
                         );
                       } finally {
                         setOpeningDoc(null);
+                        setLoadingDoc(null);
                       }
                     }}
                   >
@@ -1072,14 +1088,28 @@ function Annotate() {
       cur,
       act,
       setAct,
+      loadingDoc,
       snapOn,
       setSnapOn,
     } = useContext(C),
     box = useRef(null),
     [lineIndex, setLineIndex] = useState(0),
     [lineInput, setLineInput] = useState("1"),
+    [annotationPage, setAnnotationPage] = useState(0),
     [pending, setPending] = useState(null),
     d = docDetails[cur];
+  const lines = useMemo(
+      () => (d ? documentLines(d.text) : []),
+      [d?.text],
+    ),
+    a = useMemo(
+      () => (d ? [...d.anns].sort((x, y) => x.s - y.s) : []),
+      [d?.anns],
+    ),
+    currentAnnotationPage = Math.min(
+      annotationPage,
+      Math.max(0, Math.ceil(a.length / 100) - 1),
+    );
   useEffect(() => {
     // Annotators start on the first row that was assigned to them.
     const mine = (d?.rowAssignments || []).filter((x) => x.username === me.u);
@@ -1089,6 +1119,7 @@ function Annotate() {
         : 1;
     setLineIndex(first - 1);
     setLineInput(String(first));
+    setAnnotationPage(0);
     setPending(null);
   }, [cur]);
   const undo = () => {
@@ -1199,13 +1230,14 @@ function Annotate() {
   if (!d)
     return (
       <div className="card mut">
-        {L("Open a document from the Documents tab to start annotating.")}
+        {loadingDoc !== null && loadingDoc === cur
+          ? L("Loading document...")
+          : L("Open a document from the Documents tab to start annotating.")}
       </div>
     );
   const cl = db.labels.some((l) => l.n === act) ? act : db.labels[0]?.n,
     col = (n) => db.labels.find((l) => l.n === n)?.c || "#888";
-  const lines = documentLines(d.text),
-    rowAssignments = d.rowAssignments || [],
+  const rowAssignments = d.rowAssignments || [],
     myRowAssignments = rowAssignments.filter(
       (assignment) => assignment.username === me.u,
     ),
@@ -1280,7 +1312,6 @@ function Annotate() {
             : Math.max(8, rect.top - 58);
       setPending({ start: st, end: en, left, top });
     }, 50);
-  const a = [...d.anns].sort((x, y) => x.s - y.s);
   const currentLineIndex = Math.min(lineIndex, lines.length - 1),
     currentLine = lines[currentLineIndex],
     parts = [];
@@ -1495,6 +1526,27 @@ function Annotate() {
         )}
       </div>
       <div className="card tw">
+        {a.length > 100 && (
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <button
+              disabled={currentAnnotationPage === 0}
+              onClick={() => setAnnotationPage((page) => page - 1)}
+            >
+              {L("Previous")}
+            </button>
+            <span className="mut">
+              {currentAnnotationPage * 100 + 1}–
+              {Math.min((currentAnnotationPage + 1) * 100, a.length)} /{" "}
+              {a.length}
+            </span>
+            <button
+              disabled={(currentAnnotationPage + 1) * 100 >= a.length}
+              onClick={() => setAnnotationPage((page) => page + 1)}
+            >
+              {L("Next")}
+            </button>
+          </div>
+        )}
         <table>
           <thead>
             <tr>
@@ -1505,67 +1557,72 @@ function Annotate() {
             </tr>
           </thead>
           <tbody>
-            {a.map((n) => (
-              <tr key={n.id}>
-                <td>{d.text.slice(n.s, n.e)}</td>
-                <td>
-                  <select
-                    id={"ann-label-" + n.id}
-                    name={"ann-label-" + n.id}
-                    value={n.l}
-                    onChange={async (e) => {
-                      const label = e.target.value;
-                      updateDocDetail(d.id, (current) => ({
-                        ...current,
-                        anns: current.anns.map((annotation) =>
-                          annotation.id === n.id
-                            ? { ...annotation, l: label }
-                            : annotation,
-                        ),
-                      }));
-                      try {
-                        await api("PATCH", "/anns/" + n.id, { label });
-                        notify(`Label changed to ${label}`, "ok");
-                      } catch (error) {
+            {a
+              .slice(
+                currentAnnotationPage * 100,
+                (currentAnnotationPage + 1) * 100,
+              )
+              .map((n) => (
+                <tr key={n.id}>
+                  <td>{d.text.slice(n.s, n.e)}</td>
+                  <td>
+                    <select
+                      id={"ann-label-" + n.id}
+                      name={"ann-label-" + n.id}
+                      value={n.l}
+                      onChange={async (e) => {
+                        const label = e.target.value;
                         updateDocDetail(d.id, (current) => ({
                           ...current,
                           anns: current.anns.map((annotation) =>
                             annotation.id === n.id
-                              ? { ...annotation, l: n.l }
+                              ? { ...annotation, l: label }
                               : annotation,
                           ),
                         }));
-                        notify(
-                          error.message || "Could not change entity label.",
-                          "danger",
-                        );
+                        try {
+                          await api("PATCH", "/anns/" + n.id, { label });
+                          notify(`Label changed to ${label}`, "ok");
+                        } catch (error) {
+                          updateDocDetail(d.id, (current) => ({
+                            ...current,
+                            anns: current.anns.map((annotation) =>
+                              annotation.id === n.id
+                                ? { ...annotation, l: n.l }
+                                : annotation,
+                            ),
+                          }));
+                          notify(
+                            error.message || "Could not change entity label.",
+                            "danger",
+                          );
+                        }
+                      }}
+                    >
+                      {db.labels.map((l) => (
+                        <option key={l.n}>{l.n}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td>
+                    {n.s}–{n.e}
+                  </td>
+                  <td>
+                    <button
+                      className="danger"
+                      disabled={String(n.id).startsWith("tmp-")}
+                      onClick={() =>
+                        removeAnnotation(
+                          n,
+                          `Entity removed: "${d.text.slice(n.s, n.e)}"`,
+                        )
                       }
-                    }}
-                  >
-                    {db.labels.map((l) => (
-                      <option key={l.n}>{l.n}</option>
-                    ))}
-                  </select>
-                </td>
-                <td>
-                  {n.s}–{n.e}
-                </td>
-                <td>
-                  <button
-                    className="danger"
-                    disabled={String(n.id).startsWith("tmp-")}
-                    onClick={() =>
-                      removeAnnotation(
-                        n,
-                        `Entity removed: "${d.text.slice(n.s, n.e)}"`,
-                      )
-                    }
-                  >
-                    {L("Remove")}
-                  </button>
-                </td>
-              </tr>
-            ))}
+                    >
+                      {L("Remove")}
+                    </button>
+                  </td>
+                </tr>
+              ))}
             {!a.length && (
               <tr>
                 <td colSpan={4} className="mut">

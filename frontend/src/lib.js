@@ -39,6 +39,7 @@ const KM = {
   Approved: "បានអនុម័ត",
   Returned: "បានបញ្ជូនត្រឡប់",
   Open: "បើក",
+  "Loading document...": "កំពុងផ្ទុកឯកសារ...",
   Delete: "លុប",
   Remove: "ដកចេញ",
   Cancel: "បោះបង់",

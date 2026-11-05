@@ -1162,6 +1162,7 @@ export default {
         );
       }
       let connection;
+      let loginStage = "database connection";
       try {
         connection = await createConnection({
           host: env.HYPERDRIVE.host,
@@ -1172,6 +1173,7 @@ export default {
           charset: "utf8mb4",
           disableEval: true,
         });
+        loginStage = "user lookup";
         const { u, p } = body || {};
         const result = await execute(
           connection,
@@ -1180,10 +1182,13 @@ export default {
         );
         const record = result.rows[0];
         const password = typeof p === "string" ? p : "";
+        loginStage = "password verification";
         let valid = record && (await verifyPassword(password, record.pass));
         if (!valid && record && isLegacyBcrypt(record.pass)) {
+          loginStage = "legacy password verification";
           valid = await bcrypt.compare(password, record.pass);
           if (valid) {
+            loginStage = "legacy password migration";
             await execute(
               connection,
               "update users set pass=? where username=? and pass=?",
@@ -1200,6 +1205,7 @@ export default {
           loginHits.set(ip, recent);
           return withHeaders(err(401, "Wrong username or password."));
         }
+        loginStage = "session creation";
         const response = json(
           {
             user: { u: record.username, role: record.role },
@@ -1210,7 +1216,10 @@ export default {
         );
         return withHeaders(response);
       } catch (error) {
-        console.error("Login request failed", { code: errorCode(error) });
+        console.error("Login request failed", {
+          stage: loginStage,
+          code: errorCode(error),
+        });
         return withHeaders(err(500, "Server error"));
       } finally {
         if (connection) {

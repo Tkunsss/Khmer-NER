@@ -15,6 +15,16 @@ const decoder = new TextDecoder();
 
 const errorCode = (error) =>
   typeof error?.code === "string" ? error.code : "UNKNOWN";
+const isTransientConnectionError = (error) =>
+  [
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "EPIPE",
+    "ER_ABORTING_CONNECTION",
+    "PROTOCOL_CONNECTION_LOST",
+    "PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR",
+    "PROTOCOL_ENQUEUE_AFTER_QUIT",
+  ].includes(errorCode(error));
 
 const json = (body, status = 200, headers = {}) =>
   new Response(JSON.stringify(body), {
@@ -132,7 +142,19 @@ function maskUnassignedRows(text, assignments) {
   let row = 1;
   let assignmentIndex = 0;
   let position = 0;
-  const parts = [];
+  let chunkLength = 0;
+  let parts = [];
+  const chunks = [];
+  const append = (part) => {
+    if (!part.length) return;
+    parts.push(part);
+    chunkLength += part.length;
+    if (chunkLength >= 16 * 1024) {
+      chunks.push(parts.join(""));
+      parts = [];
+      chunkLength = 0;
+    }
+  };
   while (position < text.length) {
     let lineEnd = text.indexOf("\n", position);
     const crEnd = text.indexOf("\r", position);
@@ -145,7 +167,7 @@ function maskUnassignedRows(text, assignments) {
     )
       assignmentIndex++;
     const assignment = assignments[assignmentIndex];
-    parts.push(
+    append(
       assignment && row >= assignment.start && row <= assignment.end
         ? text.slice(position, lineEnd)
         : "•".repeat(lineEnd - position),
@@ -153,15 +175,16 @@ function maskUnassignedRows(text, assignments) {
     if (lineEnd === text.length) break;
 
     if (text[lineEnd] === "\r" && text[lineEnd + 1] === "\n") {
-      parts.push("\r\n");
+      append("\r\n");
       position = lineEnd + 2;
     } else {
-      parts.push(text[lineEnd]);
+      append(text[lineEnd]);
       position = lineEnd + 1;
     }
     row++;
   }
-  return parts.join("");
+  if (parts.length) chunks.push(parts.join(""));
+  return { text: chunks.join(""), rowCount: row };
 }
 
 async function execute(connection, sql, params = []) {
@@ -236,7 +259,7 @@ async function matchesHealthCheckToken(expected, provided) {
   return difference === 0;
 }
 
-async function handleApi(request, env, connection, body, user) {
+async function handleApi(request, env, connection, body, user, setStage = () => {}) {
   const method = request.method;
   const path = parsePath(new URL(request.url).pathname);
   if (!path) return err(400, "Invalid path.");
@@ -492,10 +515,13 @@ async function handleApi(request, env, connection, body, user) {
   if (method === "GET" && parts.length === 4 && parts[2] === "docs") {
     const id = Number(parts[3]);
     if (!Number.isSafeInteger(id) || id < 1) return err(400, "Invalid document.");
+    setStage("document detail lookup");
     const doc = (
       await execute(
         connection,
-        `select id,title,body,assignee,done,review,note from docs
+        `select id,title,body,assignee,done,review,note,
+                ${ROW_COUNT_SQL} as rowCount
+         from docs
          where id=? ${
            isAdmin
              ? ""
@@ -506,6 +532,7 @@ async function handleApi(request, env, connection, body, user) {
     ).rows[0];
     if (!doc) return err(404, "Document not found.");
 
+    setStage("document assignments lookup");
     const assignments = await execute(
       connection,
       "select username from doc_assignments where doc_id=? order by username",
@@ -517,6 +544,7 @@ async function handleApi(request, env, connection, body, user) {
         ...(doc.assignee ? [doc.assignee] : []),
       ]),
     ];
+    setStage("document row assignments lookup");
     const rowAssignments = await execute(
       connection,
       `select username,row_start as start,row_end as end from row_assignments
@@ -524,6 +552,7 @@ async function handleApi(request, env, connection, body, user) {
       isAdmin ? [id] : [id, username],
     );
     const assignedRows = rowAssignments.rows;
+    setStage("document annotations lookup");
     const annotations = await execute(
       connection,
       "select id,s,e,label l,author `by` from anns where doc_id=? order by s",
@@ -539,16 +568,35 @@ async function handleApi(request, env, connection, body, user) {
         let position = 0;
         let row = 1;
         let assignmentIndex = 0;
+        let nextLineBreak = null;
+        let nextLineEnd = 0;
         visibleAnnotations = [];
         for (const annotation of annotations.rows) {
           while (position < annotation.s) {
-            if (doc.body[position] === "\r") {
-              row++;
-              if (doc.body[position + 1] === "\n") position++;
-            } else if (doc.body[position] === "\n") {
-              row++;
+            if (nextLineBreak === null) {
+              const lineFeed = doc.body.indexOf("\n", position);
+              const carriageReturn = doc.body.indexOf("\r", position);
+              nextLineBreak =
+                lineFeed < 0 ||
+                (carriageReturn >= 0 && carriageReturn < lineFeed)
+                  ? carriageReturn
+                  : lineFeed;
+              nextLineEnd =
+                nextLineBreak < 0
+                  ? doc.body.length
+                  : nextLineBreak +
+                    (doc.body[nextLineBreak] === "\r" &&
+                    doc.body[nextLineBreak + 1] === "\n"
+                      ? 2
+                      : 1);
             }
-            position++;
+            if (nextLineBreak < 0 || nextLineBreak >= annotation.s) {
+              position = annotation.s;
+              break;
+            }
+            position = nextLineEnd;
+            nextLineBreak = null;
+            row++;
           }
           while (
             assignmentIndex < assignedRows.length &&
@@ -562,17 +610,19 @@ async function handleApi(request, env, connection, body, user) {
       }
     }
 
+    setStage("document response construction");
+    const maskedDocument =
+      !isAdmin && assignedRows.length
+        ? maskUnassignedRows(doc.body, assignedRows)
+        : null;
     return json({
       id: String(doc.id),
       title: doc.title,
-      text:
-        !isAdmin && assignedRows.length
-          ? maskUnassignedRows(doc.body, assignedRows)
-          : doc.body,
+      text: maskedDocument ? maskedDocument.text : doc.body,
       assignees,
       as: assignees.join(", "),
       rowAssignments: assignedRows,
-      rowCount: doc.body.split(/\r\n|\r|\n/).length,
+      rowCount: Number(maskedDocument?.rowCount ?? doc.rowCount),
       done: !!doc.done,
       review: doc.review,
       note: doc.note,
@@ -1262,46 +1312,67 @@ export default {
     const token = await verifyToken(decodeCookie(request, "sid"), env.JWT_SECRET);
     if (!token) return withHeaders(err(401, "Please sign in again."));
 
-    let connection;
-    try {
-      connection = await createConnection({
-        host: env.HYPERDRIVE.host,
-        user: env.HYPERDRIVE.user,
-        password: env.HYPERDRIVE.password,
-        database: env.HYPERDRIVE.database,
-        port: env.HYPERDRIVE.port,
-        charset: "utf8mb4",
-        disableEval: true,
-      });
-      const currentUser = (
-        await execute(
+    const retryableDocumentRead =
+      request.method === "GET" && /^\/api\/docs\/\d+$/.test(url.pathname);
+    for (let attempt = 0; attempt < (retryableDocumentRead ? 2 : 1); attempt++) {
+      let connection;
+      let stage = "database connection";
+      try {
+        connection = await createConnection({
+          host: env.HYPERDRIVE.host,
+          user: env.HYPERDRIVE.user,
+          password: env.HYPERDRIVE.password,
+          database: env.HYPERDRIVE.database,
+          port: env.HYPERDRIVE.port,
+          charset: "utf8mb4",
+          disableEval: true,
+        });
+        stage = "current user lookup";
+        const currentUser = (
+          await execute(
+            connection,
+            "select username,user_role as role from users where username=?",
+            [token.u],
+          )
+        ).rows[0];
+        if (!currentUser) return withHeaders(err(401, "Please sign in again."));
+        const response = await handleApi(
+          request,
+          env,
           connection,
-          "select username,user_role as role from users where username=?",
-          [token.u],
-        )
-      ).rows[0];
-      if (!currentUser) return withHeaders(err(401, "Please sign in again."));
-      const response = await handleApi(
-        request,
-        env,
-        connection,
-        body,
-        { u: currentUser.username, role: currentUser.role },
-      );
-      return withHeaders(response);
-    } catch (error) {
-      console.error("API request failed", { code: errorCode(error) });
-      return withHeaders(err(500, "Server error"));
-    } finally {
-      if (connection) {
-        try {
-          await connection.end();
-        } catch (error) {
-          console.error("Failed to close Hyperdrive connection", {
+          body,
+          { u: currentUser.username, role: currentUser.role },
+          (nextStage) => {
+            stage = nextStage;
+          },
+        );
+        return withHeaders(response);
+      } catch (error) {
+        if (
+          retryableDocumentRead &&
+          attempt === 0 &&
+          isTransientConnectionError(error)
+        ) {
+          console.warn("Retrying document read after transient database connection error", {
             code: errorCode(error),
+            stage,
           });
+          continue;
+        }
+        console.error("API request failed", { stage, code: errorCode(error) });
+        return withHeaders(err(500, "Server error"));
+      } finally {
+        if (connection) {
+          try {
+            await connection.end();
+          } catch (error) {
+            console.error("Failed to close Hyperdrive connection", {
+              code: errorCode(error),
+            });
+          }
         }
       }
     }
+    return withHeaders(err(500, "Server error"));
   },
 };

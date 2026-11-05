@@ -963,22 +963,24 @@ function Tasks() {
                   >
                     {L("Open")}
                   </button>
-                  <button
-                    className="danger"
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          "Delete this document and all its annotations? This cannot be undone.",
+                  {(A || d.assignees?.includes(me.u)) && (
+                    <button
+                      className="danger"
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            "Delete this document and all its annotations? This cannot be undone.",
+                          )
                         )
-                      )
-                        run(() => api("DELETE", "/docs/" + d.id), {
-                          ok: `Deleted document: ${d.title}`,
-                          kind: "danger",
-                        });
-                    }}
-                  >
-                    {L("Delete")}
-                  </button>
+                          run(() => api("DELETE", "/docs/" + d.id), {
+                            ok: `Deleted document: ${d.title}`,
+                            kind: "danger",
+                          });
+                      }}
+                    >
+                      {L("Delete")}
+                    </button>
+                  )}
                   {A && d.done && d.review !== "approved" && <Review d={d} />}
                 </td>
               </tr>

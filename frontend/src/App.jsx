@@ -1755,6 +1755,7 @@ function Users() {
 }
 
 function sentenceRanges(text) {
+  if (typeof text !== "string" || text.length === 0) return [];
   const boundaries = new Set();
   try {
     const segments = [
@@ -1791,6 +1792,7 @@ function sentenceRanges(text) {
 function exportText(db, annotator = "all") {
   const records = [];
   for (const d of db.docs) {
+    if (typeof d.text !== "string" || !Array.isArray(d.anns)) continue;
     const ranges = sentenceRanges(d.text);
     const annotations = d.anns
       .filter(
@@ -1848,13 +1850,15 @@ function IO() {
     allDocs = db.docs.map((doc) => docDetails[doc.id] || doc),
     exportDocs = allDocs.filter(
       (d) =>
-        me.role !== "admin" ||
-        exportAnnotator === "all" ||
-        d.assignees?.includes(exportAnnotator) ||
-        d.as === exportAnnotator ||
-        d.rowAssignments?.some(
-          (assignment) => assignment.username === exportAnnotator,
-        ),
+        typeof d.text === "string" &&
+        Array.isArray(d.anns) &&
+        (me.role !== "admin" ||
+          exportAnnotator === "all" ||
+          d.assignees?.includes(exportAnnotator) ||
+          d.as === exportAnnotator ||
+          d.rowAssignments?.some(
+            (assignment) => assignment.username === exportAnnotator,
+          )),
     ),
     txt = exportText(
       { ...db, docs: exportDocs },

@@ -754,6 +754,7 @@ function Tasks() {
       notify,
       qf,
       setQf,
+      setDb,
       setCur,
       setTab,
       putDocDetail,
@@ -952,16 +953,28 @@ function Tasks() {
                   {(A || d.assignees?.includes(me.u)) && (
                     <button
                       className="danger"
-                      onClick={() => {
+                      onClick={async () => {
                         if (
                           window.confirm(
                             "Delete this document and all its annotations? This cannot be undone.",
                           )
-                        )
-                          run(() => api("DELETE", "/docs/" + d.id), {
-                            ok: `Deleted document: ${d.title}`,
-                            kind: "danger",
-                          });
+                        ) {
+                          try {
+                            await api("DELETE", "/docs/" + d.id);
+                            setDb((current) => ({
+                              ...current,
+                              docs: current.docs.filter(
+                                (doc) => doc.id !== d.id,
+                              ),
+                            }));
+                            notify(`Deleted document: ${d.title}`, "danger");
+                          } catch (error) {
+                            notify(
+                              error.message || "Could not delete document.",
+                              "danger",
+                            );
+                          }
+                        }
                       }}
                     >
                       {L("Delete")}
@@ -1921,7 +1934,6 @@ function IO() {
         labels: labs,
         docs: items.filter((x) => x.text.trim()),
       });
-      await load(me.role);
       setMsg("Imported " + r.count + " document(s).");
       if (name === "Pasted") setTa("");
     } catch (e) {
@@ -1933,22 +1945,46 @@ function IO() {
       if (f.size > 4 * 1024 * 1024) {
         const uploadId = crypto.randomUUID(),
           chunkBytes = 1024 * 1024,
+          concurrentChunks = 4,
           decoder = new TextDecoder("utf-8");
         let index = 0;
-        for (let offset = 0; offset < f.size; offset += chunkBytes) {
-          const end = Math.min(offset + chunkBytes, f.size),
-            bytes = await f.slice(offset, end).arrayBuffer(),
-            chunk = decoder.decode(bytes, { stream: end < f.size });
-          if (chunk)
-            await api("POST", "/import/chunk", {
-              uploadId,
-              index: index++,
-              chunk,
-            });
-          if (index % 8 === 0)
-            setImportProgress(
-              `Uploading ${f.name}: ${Math.round((end / f.size) * 100)}%`,
-            );
+        for (
+          let offset = 0;
+          offset < f.size;
+          offset += chunkBytes * concurrentChunks
+        ) {
+          const batch = Array.from(
+            {
+              length: Math.min(
+                concurrentChunks,
+                Math.ceil((f.size - offset) / chunkBytes),
+              ),
+            },
+            (_, i) => {
+              const start = offset + i * chunkBytes;
+              const end = Math.min(start + chunkBytes, f.size);
+              return { end, bytes: f.slice(start, end).arrayBuffer() };
+            },
+          );
+          const buffers = await Promise.all(batch.map((chunk) => chunk.bytes));
+          const requests = [];
+          for (let i = 0; i < batch.length; i++) {
+            const { end } = batch[i];
+            const chunk = decoder.decode(buffers[i], { stream: end < f.size });
+            if (chunk)
+              requests.push(
+                api("POST", "/import/chunk", {
+                  uploadId,
+                  index: index++,
+                  chunk,
+                }),
+              );
+          }
+          await Promise.all(requests);
+          const uploaded = batch[batch.length - 1].end;
+          setImportProgress(
+            `Uploading ${f.name}: ${Math.round((uploaded / f.size) * 100)}%`,
+          );
         }
         const rest = decoder.decode();
         if (rest)
@@ -1963,7 +1999,6 @@ function IO() {
           chunks: index,
           title: f.name,
         });
-        await load(me.role);
         setMsg("Imported " + r.count + " document(s).");
         continue;
       }
@@ -1982,6 +2017,7 @@ function IO() {
     try {
       if (selectedFiles.length) await files(selectedFiles);
       if (ta.trim()) await imp(ta, "Pasted");
+      void load(me.role);
     } catch (error) {
       setMsg("Could not read file: " + error.message);
     } finally {

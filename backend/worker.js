@@ -6,6 +6,8 @@ const API_WINDOW_MS = 15 * 60 * 1000;
 const API_LIMIT = 600;
 const LOGIN_LIMIT = 10;
 const BODY_LIMIT = 2 * 1024 * 1024;
+const ROW_COUNT_SQL =
+  "1 + char_length(body) - char_length(replace(body, char(10), '')) + char_length(body) - char_length(replace(body, char(13), '')) - (char_length(body) - char_length(replace(body, char(13, 10), ''))) / 2";
 const apiHits = new Map();
 const loginHits = new Map();
 const encoder = new TextEncoder();
@@ -464,6 +466,29 @@ async function handleApi(request, env, connection, body, user) {
     return json(result);
   }
 
+  if (
+    method === "GET" &&
+    parts.length === 5 &&
+    parts[2] === "docs" &&
+    parts[4] === "row-count"
+  ) {
+    const id = Number(parts[3]);
+    if (!Number.isSafeInteger(id) || id < 1)
+      return err(400, "Invalid document.");
+    const result = await execute(
+      connection,
+      `select ${ROW_COUNT_SQL} as rowCount from docs
+       where id=? ${
+         isAdmin
+           ? ""
+           : "and (exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=docs.id and ra.username=?))"
+       }`,
+      isAdmin ? [id] : [id, username, username, username],
+    );
+    if (!result.rows.length) return err(404, "Document not found.");
+    return json({ rowCount: Number(result.rows[0].rowCount) });
+  }
+
   if (method === "GET" && parts.length === 4 && parts[2] === "docs") {
     const id = Number(parts[3]);
     if (!Number.isSafeInteger(id) || id < 1) return err(400, "Invalid document.");
@@ -660,12 +685,16 @@ async function handleApi(request, env, connection, body, user) {
       if (!annotator.rowCount) return err(400, "Choose a valid annotator.");
       await connection.beginTransaction();
       try {
-        const doc = await execute(connection, "select body from docs where id=? for update", [id]);
+        const doc = await execute(
+          connection,
+          `select ${ROW_COUNT_SQL} as rowCount from docs where id=? for update`,
+          [id],
+        );
         if (!doc.rowCount) {
           await connection.rollback();
           return err(404, "Document not found.");
         }
-        const rowCount = doc.rows[0].body.split(/\r\n|\r|\n/).length;
+        const rowCount = Number(doc.rows[0].rowCount);
         if (end > rowCount) {
           await connection.rollback();
           return err(400, "The row range exceeds the document.");

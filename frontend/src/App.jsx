@@ -364,7 +364,7 @@ function Review({ d }) {
   );
 }
 
-function Assignment({ d, annotators, L, run }) {
+function Assignment({ d, annotators, L, setDb }) {
   const current = d.assignees || (d.as ? [d.as] : []);
   const [selected, setSelected] = useState(current);
   const [rowCount, setRowCount] = useState(
@@ -408,10 +408,12 @@ function Assignment({ d, annotators, L, run }) {
     if (rowCount || rowCountLoading) return;
     setRowCountLoading(true);
     try {
-      const detail = await api("GET", "/docs/" + encodeURIComponent(d.id));
-      const count = detail.rowCount || documentLines(detail.text).length;
-      setRowCount(count);
-      setEnd(String(count));
+      const result = await api(
+        "GET",
+        "/docs/" + encodeURIComponent(d.id) + "/row-count",
+      );
+      setRowCount(result.rowCount);
+      setEnd(String(result.rowCount));
     } catch (error) {
       setRowState({
         ...IDLE,
@@ -425,14 +427,24 @@ function Assignment({ d, annotators, L, run }) {
 
   const saveAssignment = async () => {
     setSaveState({ ...IDLE, status: "busy" });
-    const err = await run(
-      () => api("PATCH", "/docs/" + d.id, { assignees: selected }),
-      { quiet: true },
-    );
+    let error = null;
+    try {
+      await api("PATCH", "/docs/" + d.id, { assignees: selected });
+      setDb((current) => ({
+        ...current,
+        docs: current.docs.map((doc) =>
+          doc.id === d.id
+            ? { ...doc, assignees: selected, as: selected.join(", ") }
+            : doc,
+        ),
+      }));
+    } catch (e) {
+      error = e.message || "Request failed";
+    }
     flash(
       setSaveState,
-      err
-        ? { ...IDLE, status: "error", text: err }
+      error
+        ? { ...IDLE, status: "error", text: error }
         : { ...IDLE, status: "ok", text: L("Assignment saved.") },
     );
   };
@@ -490,17 +502,32 @@ function Assignment({ d, annotators, L, run }) {
         conflicts: problem.conflicts || [],
       });
     setRowState({ ...IDLE, status: "busy" });
-    const err = await run(
-      () =>
-        api("PATCH", "/docs/" + d.id, {
-          rowAssignment: { username, start: +start, end: +end },
-        }),
-      { quiet: true },
-    );
+    let error = null;
+    try {
+      await api("PATCH", "/docs/" + d.id, {
+        rowAssignment: { username, start: +start, end: +end },
+      });
+      setDb((current) => ({
+        ...current,
+        docs: current.docs.map((doc) =>
+          doc.id === d.id
+            ? {
+                ...doc,
+                rowAssignments: [
+                  ...(doc.rowAssignments || []),
+                  { username, start: +start, end: +end },
+                ],
+              }
+            : doc,
+        ),
+      }));
+    } catch (e) {
+      error = e.message || "Request failed";
+    }
     flash(
       setRowState,
-      err
-        ? { ...IDLE, status: "error", text: err }
+      error
+        ? { ...IDLE, status: "error", text: error }
         : {
             ...IDLE,
             status: "ok",
@@ -669,18 +696,42 @@ function Assignment({ d, annotators, L, run }) {
                     </span>
                     <button
                       className="danger"
-                      onClick={() =>
-                        run(
-                          () =>
-                            api("PATCH", "/docs/" + d.id, {
-                              removeRowAssignment: assignment,
-                            }),
-                          {
-                            ok: `Removed rows ${assignment.start}–${assignment.end} from ${assignment.username}`,
-                            kind: "danger",
-                          },
-                        )
-                      }
+                      onClick={async () => {
+                        try {
+                          await api("PATCH", "/docs/" + d.id, {
+                            removeRowAssignment: assignment,
+                          });
+                          setDb((current) => ({
+                            ...current,
+                            docs: current.docs.map((doc) =>
+                              doc.id === d.id
+                                ? {
+                                    ...doc,
+                                    rowAssignments: (
+                                      doc.rowAssignments || []
+                                    ).filter(
+                                      (item) =>
+                                        item.username !== assignment.username ||
+                                        item.start !== assignment.start ||
+                                        item.end !== assignment.end,
+                                    ),
+                                  }
+                                : doc,
+                            ),
+                          }));
+                          flash(setRowState, {
+                            ...IDLE,
+                            status: "ok",
+                            text: `Removed rows ${assignment.start}–${assignment.end} from ${assignment.username}`,
+                          });
+                        } catch (error) {
+                          flash(setRowState, {
+                            ...IDLE,
+                            status: "error",
+                            text: error.message || "Could not remove row assignment.",
+                          });
+                        }
+                      }}
                     >
                       {L("Remove")}
                     </button>
@@ -912,7 +963,9 @@ function Tasks() {
               <tr key={d.id}>
                 <td>{d.title}</td>
                 <td>
-                  {A && <Assignment d={d} annotators={an} L={L} run={run} />}
+                  {A && (
+                    <Assignment d={d} annotators={an} L={L} setDb={setDb} />
+                  )}
                   {stt(d, L)}
                   {d.review === "returned" && d.note && (
                     <>

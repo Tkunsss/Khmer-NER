@@ -82,6 +82,10 @@ const KM = {
   "No documents yet.": "មិនទាន់មានឯកសារ។",
   "Write or paste text here": "សរសេរ ឬបិទភ្ជាប់អត្ថបទនៅទីនេះ",
   "Export as JSON": "នាំចេញជា JSON",
+  "Prepare export": "រៀបចំការនាំចេញ",
+  "Preparing export...": "កំពុងរៀបចំការនាំចេញ...",
+  "Prepare export before copying or downloading.":
+    "សូមរៀបចំការនាំចេញ មុនពេលចម្លង ឬទាញយក។",
 };
 const isMk = (c) => /[\u17B6-\u17D3\u17DD]/.test(c || "");
 function segs(t) {

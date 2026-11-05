@@ -31,7 +31,6 @@ export default function App() {
     [weak, setWeak] = useState(false);
   const [docDetails, setDocDetails] = useState({});
   const docDetailsRef = useRef(docDetails);
-  const [openingTab, setOpeningTab] = useState(null);
   const [qf, setQf] = useState(""),
     [snapOn, setSnapOn] = useState(true);
   // Pop-up messages (toasts): always visible on screen, so nobody has to scroll up.
@@ -253,22 +252,9 @@ export default function App() {
             <button
               key={x[0]}
               className={tab === x[0] ? "on" : ""}
-              disabled={openingTab === x[0]}
-              onClick={async () => {
+              onClick={() => {
                 setMsg("");
-                if (x[0] === "io") {
-                  setOpeningTab(x[0]);
-                  try {
-                    await loadAllDocDetails();
-                    setTab(x[0]);
-                  } catch (error) {
-                    notify(error.message || "Could not load documents.", "danger");
-                  } finally {
-                    setOpeningTab(null);
-                  }
-                } else {
-                  setTab(x[0]);
-                }
+                setTab(x[0]);
               }}
             >
               {L(x[1])}
@@ -1847,13 +1833,13 @@ function IO() {
     [selectedFiles, setSelectedFiles] = useState([]),
     [exportAnnotator, setExportAnnotator] = useState("all"),
     [importing, setImporting] = useState(false),
+    [preparingExport, setPreparingExport] = useState(false),
+    [exportPrepared, setExportPrepared] = useState(false),
     [importProgress, setImportProgress] = useState(""),
     annotators = db.users.filter((u) => u.role === "annotator"),
-    allDocs = db.docs.map((doc) => docDetails[doc.id] || doc),
-    exportDocs = allDocs.filter(
+    exportCandidates = db.docs.filter(
       (d) =>
-        typeof d.text === "string" &&
-        Array.isArray(d.anns) &&
+        d.annCount !== 0 &&
         (me.role !== "admin" ||
           exportAnnotator === "all" ||
           d.assignees?.includes(exportAnnotator) ||
@@ -1862,11 +1848,30 @@ function IO() {
             (assignment) => assignment.username === exportAnnotator,
           )),
     ),
+    exportDocs = exportPrepared
+      ? exportCandidates
+          .map((doc) => docDetails[doc.id])
+          .filter(
+            (doc) =>
+              typeof doc?.text === "string" && Array.isArray(doc.anns),
+          )
+      : [],
     txt = exportText(
       { ...db, docs: exportDocs },
       me.role === "admin" ? exportAnnotator : "all",
     ),
     annotationCount = exportDocs.reduce((total, d) => total + d.anns.length, 0);
+  const prepareExport = async () => {
+    setPreparingExport(true);
+    try {
+      await loadAllDocDetails(exportCandidates);
+      setExportPrepared(true);
+    } catch (error) {
+      setMsg(error.message || "Could not prepare export.");
+    } finally {
+      setPreparingExport(false);
+    }
+  };
   const imp = async (raw, name) => {
     if (!raw.trim()) {
       setMsg("There is no text to import.");
@@ -1916,8 +1921,7 @@ function IO() {
         labels: labs,
         docs: items.filter((x) => x.text.trim()),
       });
-      const docs = await load(me.role);
-      await loadAllDocDetails(docs);
+      await load(me.role);
       setMsg("Imported " + r.count + " document(s).");
       if (name === "Pasted") setTa("");
     } catch (e) {
@@ -1959,8 +1963,7 @@ function IO() {
           chunks: index,
           title: f.name,
         });
-        const docs = await load(me.role);
-        await loadAllDocDetails(docs);
+        await load(me.role);
         setMsg("Imported " + r.count + " document(s).");
         continue;
       }
@@ -2068,7 +2071,10 @@ function IO() {
               id="export-annotator"
               name="export-annotator"
               value={exportAnnotator}
-              onChange={(e) => setExportAnnotator(e.target.value)}
+              onChange={(e) => {
+                setExportAnnotator(e.target.value);
+                setExportPrepared(false);
+              }}
             >
               <option value="all">{L("All annotators")}</option>
               {annotators.map((u) => (
@@ -2080,16 +2086,32 @@ function IO() {
           </div>
         )}
         <p className="mut">
-          {L("Documents included")}: {exportDocs.length} · {L("Annotations")}:{" "}
-          {annotationCount}
+          {L("Documents included")}: {exportPrepared ? exportDocs.length : "—"}{" "}
+          · {L("Annotations")}: {exportPrepared ? annotationCount : "—"}
         </p>
+        <div className="row">
+          <button
+            className="p"
+            disabled={preparingExport}
+            onClick={prepareExport}
+          >
+            {L(preparingExport ? "Preparing export..." : "Prepare export")}
+          </button>
+          {!exportPrepared && !preparingExport && (
+            <span className="mut">
+              {L("Prepare export before copying or downloading.")}
+            </span>
+          )}
+        </div>
         <p className="mut">{L("Export as JSON")}</p>
         <textarea id="export-text" name="export-text" readOnly value={txt} />
         <div className="row" style={{ marginTop: 6 }}>
-          <button className="p" onClick={copy}>
+          <button className="p" disabled={!exportPrepared} onClick={copy}>
             {L("Copy")}
           </button>
-          <button onClick={dl}>{L("Download")}</button>
+          <button disabled={!exportPrepared} onClick={dl}>
+            {L("Download")}
+          </button>
         </div>
       </div>
     </>

@@ -951,26 +951,23 @@ async function handleApi(request, env, connection, body, user) {
         await deleteImportChunks(connection, uploadId, username);
         return err(400, "The upload is incomplete. Please select the file again.");
       }
+      await execute(connection, "set session group_concat_max_len=4294967295");
       const inserted = await execute(
         connection,
-        "insert into docs(title,body,assignee,done,note) values(?,?,?,0,'')",
+        `insert into docs(title,body,assignee,done,note)
+         select ?,group_concat(chunk order by chunk_index separator ''),?,0,''
+         from import_chunks where upload_id=? and username=?`,
         [
           String(title || "Untitled").slice(0, 1000),
-          "",
           isAdmin ? null : username,
+          uploadId,
+          username,
         ],
-      );
-      const id = inserted.insertId;
-      await execute(connection, "set session group_concat_max_len=4294967295");
-      await execute(
-        connection,
-        "update docs set body=(select group_concat(chunk order by chunk_index separator '') from import_chunks where upload_id=? and username=?) where id=?",
-        [uploadId, username, id],
       );
       const imported = await execute(
         connection,
         "select octet_length(body) as byte_count from docs where id=?",
-        [id],
+        [inserted.insertId],
       );
       if (Number(imported.rows[0].byte_count) !== Number(upload.byte_count))
         throw new Error("Imported document content was truncated");

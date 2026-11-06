@@ -1,4 +1,11 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { api } from "./api.js";
 import { KM, snap, setSnap } from "./lib.js";
 const C = createContext(),
@@ -13,6 +20,41 @@ const stt = (d, L) =>
           ? "Done"
           : "In progress",
   );
+const textLengthWithoutLabels = (node) => {
+  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue.length;
+  if (node.nodeType === Node.ELEMENT_NODE && node.tagName === "SUP") return 0;
+  return [...node.childNodes].reduce(
+    (length, child) => length + textLengthWithoutLabels(child),
+    0,
+  );
+};
+const selectionOffset = (root, target, targetOffset) => {
+  let length = 0;
+  const visit = (node) => {
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === "SUP")
+      return false;
+    if (node === target) {
+      length +=
+        node.nodeType === Node.TEXT_NODE
+          ? targetOffset
+          : [...node.childNodes]
+              .slice(0, targetOffset)
+              .reduce(
+                (total, child) => total + textLengthWithoutLabels(child),
+                0,
+              );
+      return true;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      length += node.nodeValue.length;
+      return false;
+    }
+    for (const child of node.childNodes)
+      if (visit(child)) return true;
+    return false;
+  };
+  return visit(root) ? Number(root.dataset.o) + length : null;
+};
 
 export default function App() {
   const [lang, setLang] = useState(() => {
@@ -29,11 +71,11 @@ export default function App() {
     [cur, setCur] = useState(null),
     [act, setAct] = useState(null),
     [weak, setWeak] = useState(false);
+  const [loadingDoc, setLoadingDoc] = useState(null);
   const [docDetails, setDocDetails] = useState({});
   const docDetailsRef = useRef(docDetails);
-  const [openingTab, setOpeningTab] = useState(null);
   const [qf, setQf] = useState(""),
-    [snapOn, setSnapOn] = useState(true);
+    [snapOn, setSnapOn] = useState(false);
   // Pop-up messages (toasts): always visible on screen, so nobody has to scroll up.
   const [toasts, setToasts] = useState([]),
     timers = useRef({});
@@ -71,6 +113,14 @@ export default function App() {
   };
   const putDocDetail = (detail) => {
     const next = { ...docDetailsRef.current, [detail.id]: detail };
+    docDetailsRef.current = next;
+    setDocDetails(next);
+  };
+  const updateDocDetail = (id, update) => {
+    const current = docDetailsRef.current[id];
+    if (!current) return;
+    const detail = update(current);
+    const next = { ...docDetailsRef.current, [id]: detail };
     docDetailsRef.current = next;
     setDocDetails(next);
   };
@@ -180,6 +230,8 @@ export default function App() {
     setTab,
     act,
     setAct,
+    loadingDoc,
+    setLoadingDoc,
     qf,
     setQf,
     snapOn,
@@ -187,6 +239,7 @@ export default function App() {
     setWeak,
     docDetails,
     putDocDetail,
+    updateDocDetail,
     loadAllDocDetails,
   };
   if (!me)
@@ -253,22 +306,10 @@ export default function App() {
             <button
               key={x[0]}
               className={tab === x[0] ? "on" : ""}
-              disabled={openingTab === x[0]}
-              onClick={async () => {
+              disabled={loadingDoc !== null}
+              onClick={() => {
                 setMsg("");
-                if (x[0] === "io") {
-                  setOpeningTab(x[0]);
-                  try {
-                    await loadAllDocDetails();
-                    setTab(x[0]);
-                  } catch (error) {
-                    notify(error.message || "Could not load documents.", "danger");
-                  } finally {
-                    setOpeningTab(null);
-                  }
-                } else {
-                  setTab(x[0]);
-                }
+                setTab(x[0]);
               }}
             >
               {L(x[1])}
@@ -378,7 +419,7 @@ function Review({ d }) {
   );
 }
 
-function Assignment({ d, annotators, L, run }) {
+function Assignment({ d, annotators, L, setDb }) {
   const current = d.assignees || (d.as ? [d.as] : []);
   const [selected, setSelected] = useState(current);
   const [rowCount, setRowCount] = useState(
@@ -422,10 +463,12 @@ function Assignment({ d, annotators, L, run }) {
     if (rowCount || rowCountLoading) return;
     setRowCountLoading(true);
     try {
-      const detail = await api("GET", "/docs/" + encodeURIComponent(d.id));
-      const count = detail.rowCount || documentLines(detail.text).length;
-      setRowCount(count);
-      setEnd(String(count));
+      const result = await api(
+        "GET",
+        "/docs/" + encodeURIComponent(d.id) + "/row-count",
+      );
+      setRowCount(result.rowCount);
+      setEnd(String(result.rowCount));
     } catch (error) {
       setRowState({
         ...IDLE,
@@ -439,14 +482,24 @@ function Assignment({ d, annotators, L, run }) {
 
   const saveAssignment = async () => {
     setSaveState({ ...IDLE, status: "busy" });
-    const err = await run(
-      () => api("PATCH", "/docs/" + d.id, { assignees: selected }),
-      { quiet: true },
-    );
+    let error = null;
+    try {
+      await api("PATCH", "/docs/" + d.id, { assignees: selected });
+      setDb((current) => ({
+        ...current,
+        docs: current.docs.map((doc) =>
+          doc.id === d.id
+            ? { ...doc, assignees: selected, as: selected.join(", ") }
+            : doc,
+        ),
+      }));
+    } catch (e) {
+      error = e.message || "Request failed";
+    }
     flash(
       setSaveState,
-      err
-        ? { ...IDLE, status: "error", text: err }
+      error
+        ? { ...IDLE, status: "error", text: error }
         : { ...IDLE, status: "ok", text: L("Assignment saved.") },
     );
   };
@@ -504,17 +557,32 @@ function Assignment({ d, annotators, L, run }) {
         conflicts: problem.conflicts || [],
       });
     setRowState({ ...IDLE, status: "busy" });
-    const err = await run(
-      () =>
-        api("PATCH", "/docs/" + d.id, {
-          rowAssignment: { username, start: +start, end: +end },
-        }),
-      { quiet: true },
-    );
+    let error = null;
+    try {
+      await api("PATCH", "/docs/" + d.id, {
+        rowAssignment: { username, start: +start, end: +end },
+      });
+      setDb((current) => ({
+        ...current,
+        docs: current.docs.map((doc) =>
+          doc.id === d.id
+            ? {
+                ...doc,
+                rowAssignments: [
+                  ...(doc.rowAssignments || []),
+                  { username, start: +start, end: +end },
+                ],
+              }
+            : doc,
+        ),
+      }));
+    } catch (e) {
+      error = e.message || "Request failed";
+    }
     flash(
       setRowState,
-      err
-        ? { ...IDLE, status: "error", text: err }
+      error
+        ? { ...IDLE, status: "error", text: error }
         : {
             ...IDLE,
             status: "ok",
@@ -683,18 +751,42 @@ function Assignment({ d, annotators, L, run }) {
                     </span>
                     <button
                       className="danger"
-                      onClick={() =>
-                        run(
-                          () =>
-                            api("PATCH", "/docs/" + d.id, {
-                              removeRowAssignment: assignment,
-                            }),
-                          {
-                            ok: `Removed rows ${assignment.start}–${assignment.end} from ${assignment.username}`,
-                            kind: "danger",
-                          },
-                        )
-                      }
+                      onClick={async () => {
+                        try {
+                          await api("PATCH", "/docs/" + d.id, {
+                            removeRowAssignment: assignment,
+                          });
+                          setDb((current) => ({
+                            ...current,
+                            docs: current.docs.map((doc) =>
+                              doc.id === d.id
+                                ? {
+                                    ...doc,
+                                    rowAssignments: (
+                                      doc.rowAssignments || []
+                                    ).filter(
+                                      (item) =>
+                                        item.username !== assignment.username ||
+                                        item.start !== assignment.start ||
+                                        item.end !== assignment.end,
+                                    ),
+                                  }
+                                : doc,
+                            ),
+                          }));
+                          flash(setRowState, {
+                            ...IDLE,
+                            status: "ok",
+                            text: `Removed rows ${assignment.start}–${assignment.end} from ${assignment.username}`,
+                          });
+                        } catch (error) {
+                          flash(setRowState, {
+                            ...IDLE,
+                            status: "error",
+                            text: error.message || "Could not remove row assignment.",
+                          });
+                        }
+                      }}
                     >
                       {L("Remove")}
                     </button>
@@ -748,6 +840,24 @@ function assignedRows(d, username) {
   return [];
 }
 
+function rowCompletion(docs, username) {
+  return docs.reduce(
+    (total, doc) => {
+      const progress = Number(doc.progressByUser?.[username]) || 0;
+      for (const range of assignedRows(doc, username)) {
+        const end = range.end || doc.rowCount || range.start;
+        total.assigned += Math.max(0, end - range.start + 1);
+        total.completed += Math.max(
+          0,
+          Math.min(end, progress) - range.start + 1,
+        );
+      }
+      return total;
+    },
+    { completed: 0, assigned: 0 },
+  );
+}
+
 function annotationCount(doc) {
   return doc.annCount ?? doc.anns?.length ?? null;
 }
@@ -768,8 +878,10 @@ function Tasks() {
       notify,
       qf,
       setQf,
+      setDb,
       setCur,
       setTab,
+      setLoadingDoc,
       putDocDetail,
     } = useContext(C),
     A = me.role === "admin",
@@ -782,6 +894,7 @@ function Tasks() {
       d.as === me.u ||
       d.rowAssignments?.some((assignment) => assignment.username === me.u),
   );
+  const myRowProgress = rowCompletion(myDocs, me.u);
   return (
     <>
       {A && (
@@ -808,6 +921,7 @@ function Tasks() {
                         (assignment) => assignment.username === u.u,
                       ),
                   );
+                  const rows = rowCompletion(d, u.u);
                   return (
                     <tr key={u.u}>
                       <td>{u.u}</td>
@@ -830,14 +944,13 @@ function Tasks() {
                       <td>
                         {d.filter((x) => x.done).length}/{d.length}
                       </td>
-                      <td>{annotationTotal(d)}</td>
+                      <td>{annotationTotal(d)}                      </td>
                       <td>
-                        {d.length
-                          ? Math.round(
-                              (d.filter((x) => x.done).length / d.length) * 100,
-                            )
+                        {rows.completed}/{rows.assigned} (
+                        {rows.assigned
+                          ? Math.round((rows.completed / rows.assigned) * 100)
                           : 0}
-                        %
+                        %)
                       </td>
                     </tr>
                   );
@@ -885,14 +998,14 @@ function Tasks() {
                     {annotationTotal(myDocs)}
                   </td>
                   <td>
-                    {myDocs.length
+                    {myRowProgress.completed}/{myRowProgress.assigned} (
+                    {myRowProgress.assigned
                       ? Math.round(
-                          (myDocs.filter((d) => d.done).length /
-                            myDocs.length) *
+                          (myRowProgress.completed / myRowProgress.assigned) *
                             100,
                         )
                       : 0}
-                    %
+                    %)
                   </td>
                 </tr>
               </tbody>
@@ -925,7 +1038,9 @@ function Tasks() {
               <tr key={d.id}>
                 <td>{d.title}</td>
                 <td>
-                  {A && <Assignment d={d} annotators={an} L={L} run={run} />}
+                  {A && (
+                    <Assignment d={d} annotators={an} L={L} setDb={setDb} />
+                  )}
                   {stt(d, L)}
                   {d.review === "returned" && d.note && (
                     <>
@@ -938,9 +1053,12 @@ function Tasks() {
                 <td>
                   <button
                     className="open"
-                    disabled={openingDoc === d.id}
+                    disabled={openingDoc !== null}
                     onClick={async () => {
                       setOpeningDoc(d.id);
+                      setCur(d.id);
+                      setTab("annotate");
+                      setLoadingDoc(d.id);
                       try {
                         putDocDetail(
                           await api(
@@ -948,37 +1066,52 @@ function Tasks() {
                             "/docs/" + encodeURIComponent(d.id),
                           ),
                         );
-                        setCur(d.id);
-                        setTab("annotate");
                         notify(`Opened: ${d.title}`, "info");
                       } catch (error) {
+                        setCur(null);
+                        setTab("tasks");
                         notify(
                           error.message || "Could not open document.",
                           "danger",
                         );
                       } finally {
                         setOpeningDoc(null);
+                        setLoadingDoc(null);
                       }
                     }}
                   >
                     {L("Open")}
                   </button>
-                  <button
-                    className="danger"
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          "Delete this document and all its annotations? This cannot be undone.",
-                        )
-                      )
-                        run(() => api("DELETE", "/docs/" + d.id), {
-                          ok: `Deleted document: ${d.title}`,
-                          kind: "danger",
-                        });
-                    }}
-                  >
-                    {L("Delete")}
-                  </button>
+                  {(A || d.assignees?.includes(me.u)) && (
+                    <button
+                      className="danger"
+                      onClick={async () => {
+                        if (
+                          window.confirm(
+                            "Delete this document and all its annotations? This cannot be undone.",
+                          )
+                        ) {
+                          try {
+                            await api("DELETE", "/docs/" + d.id);
+                            setDb((current) => ({
+                              ...current,
+                              docs: current.docs.filter(
+                                (doc) => doc.id !== d.id,
+                              ),
+                            }));
+                            notify(`Deleted document: ${d.title}`, "danger");
+                          } catch (error) {
+                            notify(
+                              error.message || "Could not delete document.",
+                              "danger",
+                            );
+                          }
+                        }
+                      }}
+                    >
+                      {L("Delete")}
+                    </button>
+                  )}
                   {A && d.done && d.review !== "approved" && <Review d={d} />}
                 </td>
               </tr>
@@ -1002,47 +1135,135 @@ function Annotate() {
       L,
       me,
       db,
-      run,
-      load,
       setDb,
       docDetails,
-      putDocDetail,
+      updateDocDetail,
       notify,
       cur,
       act,
       setAct,
+      loadingDoc,
       snapOn,
       setSnapOn,
     } = useContext(C),
     box = useRef(null),
     [lineIndex, setLineIndex] = useState(0),
     [lineInput, setLineInput] = useState("1"),
+    [progressLoadedFor, setProgressLoadedFor] = useState(null),
+    [progressStatus, setProgressStatus] = useState(""),
+    [annotationPage, setAnnotationPage] = useState(0),
     [pending, setPending] = useState(null),
+    annotationSaves = useRef(new Set()),
+    progressSaveQueue = useRef(Promise.resolve()),
+    progressSaveSequence = useRef(0),
     d = docDetails[cur];
+  const lines = useMemo(
+      () => (d ? documentLines(d.text) : []),
+      [d?.text],
+    ),
+    a = useMemo(
+      () => (d ? [...d.anns].sort((x, y) => x.s - y.s) : []),
+      [d?.anns],
+    ),
+    currentAnnotationPage = Math.min(
+      annotationPage,
+      Math.max(0, Math.ceil(a.length / 100) - 1),
+    );
   useEffect(() => {
-    // Annotators start on the first row that was assigned to them.
+    if (!d || !cur || !me?.u) return;
+    let active = true;
+    const key = `${me.u}:${cur}`;
     const mine = (d?.rowAssignments || []).filter((x) => x.username === me.u);
     const first =
       me.role !== "admin" && mine.length
         ? Math.min(...mine.map((x) => x.start))
         : 1;
-    setLineIndex(first - 1);
-    setLineInput(String(first));
+    const fullDocumentAssigned =
+      me.role === "admin" ||
+      (!mine.length &&
+        (d.assignees || (d.as ? [d.as] : [])).includes(me.u));
+    setProgressLoadedFor(null);
+    setProgressStatus("");
+    setAnnotationPage(0);
     setPending(null);
-  }, [cur]);
+    const restoreProgress = async () => {
+      let row = first;
+      try {
+        const saved = await api(
+          "GET",
+          "/docs/" + encodeURIComponent(cur) + "/progress",
+        );
+        if (
+          Number.isInteger(saved.row) &&
+          saved.row >= 1 &&
+          saved.row <= lines.length &&
+          (fullDocumentAssigned ||
+            mine.some(
+              (assignment) =>
+                saved.row >= assignment.start && saved.row <= assignment.end,
+            ))
+        )
+          row = saved.row;
+      } catch (error) {
+        notify(
+          error.message || "Could not load saved progress. Starting at the first assigned row.",
+          "danger",
+        );
+      }
+      if (!active) return;
+      setLineIndex(row - 1);
+      setLineInput(String(row));
+      setProgressLoadedFor(key);
+    };
+    void restoreProgress();
+    return () => {
+      active = false;
+    };
+  }, [cur, d?.id, me?.u]);
   const undo = () => {
     if (!d) return;
     const m = d.anns.filter((n) => n.by === me.u);
-    if (m.length)
-      run(
-        () =>
-          api(
-            "DELETE",
-            "/anns/" + m.reduce((a, b) => (+b.id > +a.id ? b : a)).id,
-          ),
-        { ok: "Undo: last entity removed", kind: "danger" },
-      );
-    else notify("Nothing to undo.", "info");
+    if (!m.length) {
+      notify("Nothing to undo.", "info");
+      return;
+    }
+    removeAnnotation(
+      m.reduce((a, b) => (+b.id > +a.id ? b : a)),
+      "Undo: last entity removed",
+    );
+  };
+  const adjustAnnotationCount = (amount) =>
+    setDb((current) => ({
+      ...current,
+      docs: current.docs.map((doc) =>
+        doc.id === d.id && typeof doc.annCount === "number"
+          ? { ...doc, annCount: Math.max(0, doc.annCount + amount) }
+          : doc,
+      ),
+    }));
+  const removeAnnotation = async (annotation, message) => {
+    if (String(annotation.id).startsWith("tmp-")) {
+      updateDocDetail(d.id, (current) => ({
+        ...current,
+        anns: current.anns.filter((item) => item.id !== annotation.id),
+      }));
+      return;
+    }
+    updateDocDetail(d.id, (current) => ({
+      ...current,
+      anns: current.anns.filter((item) => item.id !== annotation.id),
+    }));
+    try {
+      await api("DELETE", "/anns/" + annotation.id);
+      adjustAnnotationCount(-1);
+      if (message) notify(message, "danger");
+    } catch (error) {
+      updateDocDetail(d.id, (current) => ({
+        ...current,
+        anns: [...current.anns, annotation].sort((a, b) => a.s - b.s),
+      }));
+      notify(error.message || "Could not remove the entity.", "danger");
+    }
   };
   const chooseLabel = (label) => {
     if (!pending) {
@@ -1052,13 +1273,72 @@ function Annotate() {
     // Show the new entity at once; save in the background, then sync with the server.
     const { start, end } = pending,
       docId = d.id,
-      temp = { id: "tmp-" + Date.now(), s: start, e: end, l: label, by: me.u };
+      saveKey = `${docId}:${start}:${end}`,
+      temp = {
+        id: "tmp-" + crypto.randomUUID(),
+        s: start,
+        e: end,
+        l: label,
+        by: me.u,
+      };
+    if (annotationSaves.current.has(saveKey)) return;
+    annotationSaves.current.add(saveKey);
     setPending(null);
     getSelection()?.removeAllRanges();
-    putDocDetail({ ...d, anns: [...d.anns, temp] });
+    updateDocDetail(d.id, (current) => ({
+      ...current,
+      anns: [...current.anns, temp],
+    }));
     api("POST", "/docs/" + docId + "/anns", { start, end, label })
-      .catch((e) => notify(e.message || "Could not save the entity.", "danger"))
-      .finally(() => load(me.role));
+      .then((result) => {
+        updateDocDetail(docId, (current) => ({
+          ...current,
+          anns: current.anns.map((annotation) =>
+            annotation.id === temp.id
+              ? { ...annotation, id: String(result.id) }
+              : annotation,
+          ),
+        }));
+        setDb((current) => ({
+          ...current,
+          docs: current.docs.map((doc) =>
+            doc.id === docId && typeof doc.annCount === "number"
+              ? { ...doc, annCount: doc.annCount + 1 }
+              : doc,
+          ),
+        }));
+      })
+      .catch(async (error) => {
+        updateDocDetail(docId, (current) => ({
+          ...current,
+          anns: current.anns.filter(
+            (annotation) => annotation.id !== temp.id,
+          ),
+        }));
+        if (/overlaps an existing entity/i.test(error.message || "")) {
+          try {
+            const latest = await api(
+              "GET",
+              "/docs/" + encodeURIComponent(docId),
+            );
+            updateDocDetail(docId, () => latest);
+            notify(
+              "Another annotation overlaps that text. The document was refreshed; select a different span.",
+              "info",
+            );
+          } catch (refreshError) {
+            notify(
+              `That text overlaps an existing annotation. Could not refresh the document: ${
+                refreshError.message || "request failed"
+              }`,
+              "danger",
+            );
+          }
+        } else {
+          notify(error.message || "Could not save the entity.", "danger");
+        }
+      })
+      .finally(() => annotationSaves.current.delete(saveKey));
   };
   useEffect(() => {
     const k = (e) => {
@@ -1066,11 +1346,30 @@ function Annotate() {
       if (e.key === "Escape" && pending) {
         setPending(null);
         getSelection()?.removeAllRanges();
+      } else if (e.key === "Enter" && pending) {
+        const label =
+          db.labels.find((item) => item.n === act)?.n || db.labels[0]?.n;
+        if (label) {
+          e.preventDefault();
+          chooseLabel(label);
+        }
       } else if (/^[1-9]$/.test(e.key) && db.labels[e.key - 1])
         chooseLabel(db.labels[e.key - 1].n);
       else if ((e.ctrlKey || e.metaKey) && e.key === "z") {
         e.preventDefault();
         undo();
+      } else if (e.key === "PageDown" && d && !pending) {
+        const row = stepRow(lineIndex + 1, 1);
+        if (row !== null) {
+          e.preventDefault();
+          goRow(row);
+        }
+      } else if (e.key === "PageUp" && d && !pending) {
+        const row = stepRow(lineIndex + 1, -1);
+        if (row !== null) {
+          e.preventDefault();
+          goRow(row);
+        }
       }
     };
     document.addEventListener("keydown", k);
@@ -1079,13 +1378,14 @@ function Annotate() {
   if (!d)
     return (
       <div className="card mut">
-        {L("Open a document from the Documents tab to start annotating.")}
+        {loadingDoc !== null && loadingDoc === cur
+          ? L("Loading document...")
+          : L("Open a document from the Documents tab to start annotating.")}
       </div>
     );
   const cl = db.labels.some((l) => l.n === act) ? act : db.labels[0]?.n,
     col = (n) => db.labels.find((l) => l.n === n)?.c || "#888";
-  const lines = documentLines(d.text),
-    rowAssignments = d.rowAssignments || [],
+  const rowAssignments = d.rowAssignments || [],
     myRowAssignments = rowAssignments.filter(
       (assignment) => assignment.username === me.u,
     ),
@@ -1104,9 +1404,41 @@ function Annotate() {
         ? lines.length
         : Math.max(...myRowAssignments.map((assignment) => assignment.end));
   const goRow = (row) => {
+    if (!d || !cur || progressLoadedFor !== `${me.u}:${cur}`) return;
     setPending(null);
     setLineIndex(row - 1);
     setLineInput(String(row));
+    const sequence = ++progressSaveSequence.current;
+    setProgressStatus("saving");
+    progressSaveQueue.current = progressSaveQueue.current
+      .catch(() => {})
+      .then(() =>
+        api("PUT", "/docs/" + encodeURIComponent(cur) + "/progress", { row }),
+      )
+      .then(() => {
+        setDb((current) => ({
+          ...current,
+          docs: current.docs.map((doc) =>
+            doc.id === cur
+              ? {
+                  ...doc,
+                  progressByUser: {
+                    ...doc.progressByUser,
+                    [me.u]: row,
+                  },
+                }
+              : doc,
+          ),
+        }));
+        if (sequence === progressSaveSequence.current)
+          setProgressStatus("saved");
+      })
+      .catch((error) => {
+        if (sequence === progressSaveSequence.current) {
+          setProgressStatus("error");
+          notify(error.message || "Could not save progress.", "danger");
+        }
+      });
   };
   // Next / previous row the person may work on (skips rows assigned to others).
   const unrestricted =
@@ -1136,13 +1468,22 @@ function Annotate() {
       const s = getSelection();
       if (!s.rangeCount || s.isCollapsed || !cl) return;
       const r = s.getRangeAt(0),
-        A = r.startContainer.parentElement?.closest("[data-o]"),
-        B = r.endContainer.parentElement?.closest("[data-o]"),
+        startElement =
+          r.startContainer.nodeType === Node.ELEMENT_NODE
+            ? r.startContainer
+            : r.startContainer.parentElement,
+        endElement =
+          r.endContainer.nodeType === Node.ELEMENT_NODE
+            ? r.endContainer
+            : r.endContainer.parentElement,
+        A = startElement?.closest("[data-o]"),
+        B = endElement?.closest("[data-o]"),
         bx = box.current;
       if (!A || !B || !bx.contains(A) || !bx.contains(B)) return;
       const t = d.text;
-      let st = +A.dataset.o + r.startOffset,
-        en = +B.dataset.o + r.endOffset;
+      let st = selectionOffset(A, r.startContainer, r.startOffset),
+        en = selectionOffset(B, r.endContainer, r.endOffset);
+      if (st === null || en === null) return;
       if (
         !rowAssigned(rowForOffset(t, st)) ||
         rowForOffset(t, en - 1) !== rowForOffset(t, st)
@@ -1152,6 +1493,10 @@ function Annotate() {
       while (en > st && /\s/.test(t[en - 1])) en--;
       [st, en] = snap(t, st, en);
       if (en <= st) return;
+      if (a.some((annotation) => st < annotation.e && en > annotation.s)) {
+        notify("That text overlaps an existing entity. Remove it first.", "danger");
+        return;
+      }
       const rect = r.getBoundingClientRect(),
         left = Math.max(8, Math.min(rect.left, window.innerWidth - 260)),
         top =
@@ -1160,7 +1505,6 @@ function Annotate() {
             : Math.max(8, rect.top - 58);
       setPending({ start: st, end: en, left, top });
     }, 50);
-  const a = [...d.anns].sort((x, y) => x.s - y.s);
   const currentLineIndex = Math.min(lineIndex, lines.length - 1),
     currentLine = lines[currentLineIndex],
     parts = [];
@@ -1169,7 +1513,8 @@ function Annotate() {
     (n) => {
       const start = Math.max(n.s, currentLine.start),
         end = Math.min(n.e, currentLine.end);
-      if (start > o)
+    if (start < o) return;
+    if (start > o)
         parts.push(
           <span key={"t" + o} data-o={o}>
             {d.text.slice(o, start)}
@@ -1256,6 +1601,7 @@ function Annotate() {
                   : "")
               }
               title={L("Go to row") + " " + r.start}
+              disabled={progressLoadedFor !== `${me.u}:${cur}`}
               onClick={() => goRow(r.start)}
             >
               {L("Rows")} {r.start}–{r.end}
@@ -1275,15 +1621,29 @@ function Annotate() {
               ? L("assigned to you")
               : L("not assigned to you")}
           </span>
+          {progressStatus && (
+            <span className="mut" role="status">
+              {L(
+                progressStatus === "saving"
+                  ? "Saving progress..."
+                  : progressStatus === "saved"
+                    ? "Progress saved"
+                    : "Progress save failed",
+              )}
+            </span>
+          )}
         </div>
         <p className="mut" style={{ margin: "4px 0" }}>
           {L(
-            "Select text to tag it with the chosen label. Keys 1-9 pick a label.",
+            "Select text, then press Enter to use the selected label or 1-9 to tag with a label. Page Up/Down moves between rows. Progress saves automatically.",
           )}
         </p>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <button
-            disabled={stepRow(currentLineIndex + 1, -1) === null}
+            disabled={
+              progressLoadedFor !== `${me.u}:${cur}` ||
+              stepRow(currentLineIndex + 1, -1) === null
+            }
             onClick={() => goRow(stepRow(currentLineIndex + 1, -1))}
           >
             {L("Previous")}
@@ -1295,8 +1655,7 @@ function Annotate() {
               e.preventDefault();
               const row = Number(lineInput);
               if (Number.isInteger(row) && row >= 1 && row <= rowLimit) {
-                setPending(null);
-                setLineIndex(row - 1);
+                goRow(row);
               }
             }}
           >
@@ -1316,6 +1675,7 @@ function Annotate() {
             <button
               type="submit"
               disabled={
+                progressLoadedFor !== `${me.u}:${cur}` ||
                 !Number.isInteger(Number(lineInput)) ||
                 Number(lineInput) < 1 ||
                 Number(lineInput) > rowLimit
@@ -1325,7 +1685,10 @@ function Annotate() {
             </button>
           </form>
           <button
-            disabled={stepRow(currentLineIndex + 1, 1) === null}
+            disabled={
+              progressLoadedFor !== `${me.u}:${cur}` ||
+              stepRow(currentLineIndex + 1, 1) === null
+            }
             onClick={() => goRow(stepRow(currentLineIndex + 1, 1))}
           >
             {L("Next")}
@@ -1375,6 +1738,27 @@ function Annotate() {
         )}
       </div>
       <div className="card tw">
+        {a.length > 100 && (
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <button
+              disabled={currentAnnotationPage === 0}
+              onClick={() => setAnnotationPage((page) => page - 1)}
+            >
+              {L("Previous")}
+            </button>
+            <span className="mut">
+              {currentAnnotationPage * 100 + 1}–
+              {Math.min((currentAnnotationPage + 1) * 100, a.length)} /{" "}
+              {a.length}
+            </span>
+            <button
+              disabled={(currentAnnotationPage + 1) * 100 >= a.length}
+              onClick={() => setAnnotationPage((page) => page + 1)}
+            >
+              {L("Next")}
+            </button>
+          </div>
+        )}
         <table>
           <thead>
             <tr>
@@ -1385,44 +1769,72 @@ function Annotate() {
             </tr>
           </thead>
           <tbody>
-            {a.map((n) => (
-              <tr key={n.id}>
-                <td>{d.text.slice(n.s, n.e)}</td>
-                <td>
-                  <select
-                    id={"ann-label-" + n.id}
-                    name={"ann-label-" + n.id}
-                    value={n.l}
-                    onChange={(e) => {
-                      const label = e.target.value;
-                      run(() => api("PATCH", "/anns/" + n.id, { label }), {
-                        ok: `Label changed to ${label}`,
-                      });
-                    }}
-                  >
-                    {db.labels.map((l) => (
-                      <option key={l.n}>{l.n}</option>
-                    ))}
-                  </select>
-                </td>
-                <td>
-                  {n.s}–{n.e}
-                </td>
-                <td>
-                  <button
-                    className="danger"
-                    onClick={() =>
-                      run(() => api("DELETE", "/anns/" + n.id), {
-                        ok: `Entity removed: "${d.text.slice(n.s, n.e)}"`,
-                        kind: "danger",
-                      })
-                    }
-                  >
-                    {L("Remove")}
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {a
+              .slice(
+                currentAnnotationPage * 100,
+                (currentAnnotationPage + 1) * 100,
+              )
+              .map((n) => (
+                <tr key={n.id}>
+                  <td>{d.text.slice(n.s, n.e)}</td>
+                  <td>
+                    <select
+                      id={"ann-label-" + n.id}
+                      name={"ann-label-" + n.id}
+                      value={n.l}
+                      onChange={async (e) => {
+                        const label = e.target.value;
+                        updateDocDetail(d.id, (current) => ({
+                          ...current,
+                          anns: current.anns.map((annotation) =>
+                            annotation.id === n.id
+                              ? { ...annotation, l: label }
+                              : annotation,
+                          ),
+                        }));
+                        try {
+                          await api("PATCH", "/anns/" + n.id, { label });
+                          notify(`Label changed to ${label}`, "ok");
+                        } catch (error) {
+                          updateDocDetail(d.id, (current) => ({
+                            ...current,
+                            anns: current.anns.map((annotation) =>
+                              annotation.id === n.id
+                                ? { ...annotation, l: n.l }
+                                : annotation,
+                            ),
+                          }));
+                          notify(
+                            error.message || "Could not change entity label.",
+                            "danger",
+                          );
+                        }
+                      }}
+                    >
+                      {db.labels.map((l) => (
+                        <option key={l.n}>{l.n}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td>
+                    {n.s}–{n.e}
+                  </td>
+                  <td>
+                    <button
+                      className="danger"
+                      disabled={String(n.id).startsWith("tmp-")}
+                      onClick={() =>
+                        removeAnnotation(
+                          n,
+                          `Entity removed: "${d.text.slice(n.s, n.e)}"`,
+                        )
+                      }
+                    >
+                      {L("Remove")}
+                    </button>
+                  </td>
+                </tr>
+              ))}
             {!a.length && (
               <tr>
                 <td colSpan={4} className="mut">
@@ -1755,6 +2167,7 @@ function Users() {
 }
 
 function sentenceRanges(text) {
+  if (typeof text !== "string" || text.length === 0) return [];
   const boundaries = new Set();
   try {
     const segments = [
@@ -1791,6 +2204,7 @@ function sentenceRanges(text) {
 function exportText(db, annotator = "all") {
   const records = [];
   for (const d of db.docs) {
+    if (typeof d.text !== "string" || !Array.isArray(d.anns)) continue;
     const ranges = sentenceRanges(d.text);
     const annotations = d.anns
       .filter(
@@ -1843,31 +2257,47 @@ function IO() {
     [selectedFiles, setSelectedFiles] = useState([]),
     [exportAnnotator, setExportAnnotator] = useState("all"),
     [importing, setImporting] = useState(false),
+    [preparingExport, setPreparingExport] = useState(false),
+    [exportPrepared, setExportPrepared] = useState(false),
     [importProgress, setImportProgress] = useState(""),
     annotators = db.users.filter((u) => u.role === "annotator"),
-    allDocs = db.docs.map((doc) => docDetails[doc.id] || doc),
-    exportDocs = allDocs.filter(
+    exportCandidates = db.docs.filter(
       (d) =>
-        me.role !== "admin" ||
-        exportAnnotator === "all" ||
-        d.assignees?.includes(exportAnnotator) ||
-        d.as === exportAnnotator ||
-        d.rowAssignments?.some(
-          (assignment) => assignment.username === exportAnnotator,
-        ),
+        d.annCount !== 0 &&
+        (me.role !== "admin" ||
+          exportAnnotator === "all" ||
+          d.assignees?.includes(exportAnnotator) ||
+          d.as === exportAnnotator ||
+          d.rowAssignments?.some(
+            (assignment) => assignment.username === exportAnnotator,
+          )),
     ),
+    exportDocs = exportPrepared
+      ? exportCandidates
+          .map((doc) => docDetails[doc.id])
+          .filter(
+            (doc) =>
+              typeof doc?.text === "string" && Array.isArray(doc.anns),
+          )
+      : [],
     txt = exportText(
       { ...db, docs: exportDocs },
       me.role === "admin" ? exportAnnotator : "all",
     ),
     annotationCount = exportDocs.reduce((total, d) => total + d.anns.length, 0);
-  const imp = async (raw, name) => {
-    if (!raw.trim()) {
-      setMsg("There is no text to import.");
-      return;
+  const prepareExport = async () => {
+    setPreparingExport(true);
+    try {
+      await loadAllDocDetails(exportCandidates);
+      setExportPrepared(true);
+    } catch (error) {
+      setMsg(error.message || "Could not prepare export.");
+    } finally {
+      setPreparingExport(false);
     }
-    let items,
-      labs = [];
+  };
+  const parseImport = (raw, name) => {
+    let items, labels = [];
     try {
       const parsed = JSON.parse(raw);
       const values = Array.isArray(parsed)
@@ -1886,7 +2316,7 @@ function IO() {
         )
       ) {
         if (!Array.isArray(parsed) && Array.isArray(parsed.labels))
-          labs = parsed.labels;
+          labels = parsed.labels;
         items = values.map((item, i) =>
           typeof item === "string"
             ? { title: name + " #" + (i + 1), text: item }
@@ -1905,76 +2335,127 @@ function IO() {
     if (!items) {
       items = [{ title: name, text: raw }];
     }
-    try {
-      const r = await api("POST", "/import", {
-        labels: labs,
-        docs: items.filter((x) => x.text.trim()),
-      });
-      const docs = await load(me.role);
-      await loadAllDocDetails(docs);
-      setMsg("Imported " + r.count + " document(s).");
-      if (name === "Pasted") setTa("");
-    } catch (e) {
-      setMsg(e.message);
-    }
-  };
-  const files = async (fs) => {
-    for (const f of [...fs]) {
-      if (f.size > 4 * 1024 * 1024) {
-        const uploadId = crypto.randomUUID(),
-          chunkBytes = 1024 * 1024,
-          decoder = new TextDecoder("utf-8");
-        let index = 0;
-        for (let offset = 0; offset < f.size; offset += chunkBytes) {
-          const end = Math.min(offset + chunkBytes, f.size),
-            bytes = await f.slice(offset, end).arrayBuffer(),
-            chunk = decoder.decode(bytes, { stream: end < f.size });
-          if (chunk)
-            await api("POST", "/import/chunk", {
-              uploadId,
-              index: index++,
-              chunk,
-            });
-          if (index % 8 === 0)
-            setImportProgress(
-              `Uploading ${f.name}: ${Math.round((end / f.size) * 100)}%`,
-            );
-        }
-        const rest = decoder.decode();
-        if (rest)
-          await api("POST", "/import/chunk", {
-            uploadId,
-            index: index++,
-            chunk: rest,
-          });
-        setImportProgress(`Finishing import: ${f.name}`);
-        const r = await api("POST", "/import/finish", {
-          uploadId,
-          chunks: index,
-          title: f.name,
-        });
-        const docs = await load(me.role);
-        await loadAllDocDetails(docs);
-        setMsg("Imported " + r.count + " document(s).");
-        continue;
-      }
-      const raw = await new Promise((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.onerror = () => reject(r.error || new Error("Unable to read file."));
-        r.readAsText(f);
-      });
-      await imp(raw, f.name);
-    }
+    return { labels, docs: items.filter((item) => item.text.trim()) };
   };
   const doImport = async () => {
     setImporting(true);
     setImportProgress("");
+    let docs = [],
+      labels = [],
+      importedCount = 0;
+    const maxBatchBytes = 8 * 1024 * 1024;
+    const payloadBytes = (nextDocs, nextLabels) =>
+      new TextEncoder().encode(
+        JSON.stringify({ labels: nextLabels, docs: nextDocs }),
+      ).byteLength;
+    const flush = async () => {
+      if (!docs.length) return;
+      const result = await api("POST", "/import", { labels, docs });
+      importedCount += result.count;
+      docs = [];
+      labels = [];
+    };
+    const addImport = async (raw, name) => {
+      const parsed = parseImport(raw, name);
+      if (!parsed.docs.length) return;
+      if (
+        docs.length &&
+        payloadBytes([...docs, ...parsed.docs], [...labels, ...parsed.labels]) >
+          maxBatchBytes
+      )
+        await flush();
+      const nextDocs = [...docs, ...parsed.docs];
+      const nextLabels = [...labels, ...parsed.labels];
+      if (payloadBytes(nextDocs, nextLabels) > maxBatchBytes)
+        throw new Error(
+          `Import "${name}" is too large for a single request. Split it into smaller files.`,
+        );
+      docs = nextDocs;
+      labels = nextLabels;
+    };
+    const uploadLargeFile = async (file) => {
+      const uploadId = crypto.randomUUID(),
+        chunkBytes = 1024 * 1024,
+        concurrentChunks = 4,
+        decoder = new TextDecoder("utf-8");
+      let index = 0;
+      for (let offset = 0; offset < file.size; offset += chunkBytes * concurrentChunks) {
+        const batch = Array.from(
+          {
+            length: Math.min(
+              concurrentChunks,
+              Math.ceil((file.size - offset) / chunkBytes),
+            ),
+          },
+          (_, i) => {
+            const start = offset + i * chunkBytes;
+            const end = Math.min(start + chunkBytes, file.size);
+            return { end, bytes: file.slice(start, end).arrayBuffer() };
+          },
+        );
+        const buffers = await Promise.all(batch.map((chunk) => chunk.bytes));
+        const requests = [];
+        for (let i = 0; i < batch.length; i++) {
+          const { end } = batch[i];
+          const chunk = decoder.decode(buffers[i], { stream: end < file.size });
+          if (chunk)
+            requests.push(
+              api("POST", "/import/chunk", {
+                uploadId,
+                index: index++,
+                chunk,
+              }),
+            );
+        }
+        await Promise.all(requests);
+        const uploaded = batch[batch.length - 1].end;
+        setImportProgress(
+          `Uploading ${file.name}: ${Math.round((uploaded / file.size) * 100)}%`,
+        );
+      }
+      const rest = decoder.decode();
+      if (rest)
+        await api("POST", "/import/chunk", {
+          uploadId,
+          index: index++,
+          chunk: rest,
+        });
+      setImportProgress(`Finishing import: ${file.name}`);
+      const result = await api("POST", "/import/finish", {
+        uploadId,
+        chunks: index,
+        title: file.name,
+      });
+      importedCount += result.count;
+    };
     try {
-      if (selectedFiles.length) await files(selectedFiles);
-      if (ta.trim()) await imp(ta, "Pasted");
+      for (const file of selectedFiles) {
+        setImportProgress(`Preparing ${file.name}`);
+        if (file.size > 4 * 1024 * 1024) {
+          await flush();
+          await uploadLargeFile(file);
+          continue;
+        }
+        const raw = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () =>
+            reject(reader.error || new Error("Unable to read file."));
+          reader.readAsText(file);
+        });
+        await addImport(raw, file.name);
+      }
+      if (ta.trim()) await addImport(ta, "Pasted");
+      await flush();
+      if (!importedCount) {
+        setMsg("There is no text to import.");
+        return;
+      }
+      setMsg("Imported " + importedCount + " document(s).");
+      if (ta.trim()) setTa("");
+      void load(me.role);
     } catch (error) {
-      setMsg("Could not read file: " + error.message);
+      setMsg("Could not import: " + error.message);
     } finally {
       setSelectedFiles([]);
       if (fileInput.current) fileInput.current.value = "";
@@ -2062,7 +2543,10 @@ function IO() {
               id="export-annotator"
               name="export-annotator"
               value={exportAnnotator}
-              onChange={(e) => setExportAnnotator(e.target.value)}
+              onChange={(e) => {
+                setExportAnnotator(e.target.value);
+                setExportPrepared(false);
+              }}
             >
               <option value="all">{L("All annotators")}</option>
               {annotators.map((u) => (
@@ -2074,16 +2558,32 @@ function IO() {
           </div>
         )}
         <p className="mut">
-          {L("Documents included")}: {exportDocs.length} · {L("Annotations")}:{" "}
-          {annotationCount}
+          {L("Documents included")}: {exportPrepared ? exportDocs.length : "—"}{" "}
+          · {L("Annotations")}: {exportPrepared ? annotationCount : "—"}
         </p>
+        <div className="row">
+          <button
+            className="p"
+            disabled={preparingExport}
+            onClick={prepareExport}
+          >
+            {L(preparingExport ? "Preparing export..." : "Prepare export")}
+          </button>
+          {!exportPrepared && !preparingExport && (
+            <span className="mut">
+              {L("Prepare export before copying or downloading.")}
+            </span>
+          )}
+        </div>
         <p className="mut">{L("Export as JSON")}</p>
         <textarea id="export-text" name="export-text" readOnly value={txt} />
         <div className="row" style={{ marginTop: 6 }}>
-          <button className="p" onClick={copy}>
+          <button className="p" disabled={!exportPrepared} onClick={copy}>
             {L("Copy")}
           </button>
-          <button onClick={dl}>{L("Download")}</button>
+          <button disabled={!exportPrepared} onClick={dl}>
+            {L("Download")}
+          </button>
         </div>
       </div>
     </>

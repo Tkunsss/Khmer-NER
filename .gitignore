@@ -2,3 +2,4 @@ node_modules
 dist
 .env
 backend/.dev.vars
+backend/cloudflare-migration/

@@ -14,38 +14,66 @@ if (!SECRET) {
   console.error("JWT_SECRET is required");
   process.exit(1);
 }
-if (!process.env.DATABASE_URL) {
-  console.error("DATABASE_URL is required");
-  process.exit(1);
-}
 if (process.env.RENDER && !process.env.ADMIN_PASSWORD) {
   console.error("ADMIN_PASSWORD is required");
   process.exit(1);
 }
-let databaseUrl;
-try {
-  databaseUrl = new URL(process.env.DATABASE_URL);
-} catch (e) {
-  console.error("DATABASE_URL must be a valid MySQL connection URI");
-  process.exit(1);
-}
-if (databaseUrl.protocol !== "mysql:") {
-  console.error("DATABASE_URL must use the mysql:// scheme");
-  process.exit(1);
+let mysqlOptions;
+if (process.env.DATABASE_URL) {
+  let databaseUrl;
+  try {
+    databaseUrl = new URL(process.env.DATABASE_URL);
+  } catch (e) {
+    console.error("DATABASE_URL must be a valid MySQL connection URI");
+    process.exit(1);
+  }
+  if (databaseUrl.protocol !== "mysql:") {
+    console.error("DATABASE_URL must use the mysql:// scheme");
+    process.exit(1);
+  }
+  mysqlOptions = {
+    host: databaseUrl.hostname,
+    port: Number(databaseUrl.port || 3306),
+    user: decodeURIComponent(databaseUrl.username),
+    password: decodeURIComponent(databaseUrl.password),
+    database: decodeURIComponent(databaseUrl.pathname.slice(1)),
+    ssl: {
+      ca: process.env.MYSQL_CA
+        ? process.env.MYSQL_CA.replace(/\\n/g, "\n")
+        : fs.readFileSync(path.join(__dirname, "aiven-ca.pem"), "utf8"),
+      rejectUnauthorized: true,
+    },
+  };
+} else {
+  if (
+    !process.env.MYSQL_USER ||
+    process.env.MYSQL_PASSWORD === undefined ||
+    !process.env.MYSQL_DATABASE
+  ) {
+    console.error(
+      "Set DATABASE_URL or MYSQL_USER, MYSQL_PASSWORD, and MYSQL_DATABASE",
+    );
+    process.exit(1);
+  }
+  mysqlOptions = {
+    host: process.env.MYSQL_HOST || "localhost",
+    port: Number(process.env.MYSQL_PORT || 3306),
+    user: process.env.MYSQL_USER,
+    password: process.env.MYSQL_PASSWORD,
+    database: process.env.MYSQL_DATABASE,
+  };
+  if (process.env.MYSQL_SSL === "true") {
+    mysqlOptions.ssl = {
+      rejectUnauthorized: true,
+      ...(process.env.MYSQL_CA
+        ? { ca: process.env.MYSQL_CA.replace(/\\n/g, "\n") }
+        : {}),
+    };
+  }
 }
 const pool = mysql.createPool({
-  host: databaseUrl.hostname,
-  port: Number(databaseUrl.port || 3306),
-  user: decodeURIComponent(databaseUrl.username),
-  password: decodeURIComponent(databaseUrl.password),
-  database: decodeURIComponent(databaseUrl.pathname.slice(1)),
+  ...mysqlOptions,
   charset: "utf8mb4",
-  ssl: {
-    ca: process.env.MYSQL_CA
-      ? process.env.MYSQL_CA.replace(/\\n/g, "\n")
-      : fs.readFileSync(path.join(__dirname, "aiven-ca.pem"), "utf8"),
-    rejectUnauthorized: true,
-  },
   waitForConnections: true,
   connectionLimit: 10,
 });
@@ -73,7 +101,7 @@ pool.connect = async () => {
 };
 const app = express();
 app.set("trust proxy", 1);
-app.use(helmet(), cookieParser(), express.json({ limit: "2mb" }));
+app.use(helmet(), cookieParser(), express.json({ limit: "10mb" }));
 const h = (f) => (q, s) =>
   f(q, s).catch((e) => {
     console.error(e);
@@ -168,8 +196,12 @@ app.post(
       a = (hits.get(q.ip) || []).filter((t) => now - t < 9e5);
     if (a.length >= 10)
       return err(s, 429, "Too many failed attempts. Try again in 15 minutes.");
-    const r = (await pool.query("select * from users where username=?", [u]))
-      .rows[0];
+    const r = (
+      await pool.query(
+        "select username,pass,user_role as role from users where username=?",
+        [u],
+      )
+    ).rows[0];
     if (!r || !(await bcrypt.compare(p || "", r.pass))) {
       a.push(now);
       hits.set(q.ip, a);
@@ -177,7 +209,10 @@ app.post(
     }
     s.cookie("sid", jwt.sign({ u: r.username }, SECRET, { expiresIn: "12h" }), {
       httpOnly: true,
-      secure: !!process.env.RENDER,
+      secure:
+        process.env.COOKIE_SECURE === "true" ||
+        process.env.NODE_ENV === "production" ||
+        !!process.env.RENDER,
       sameSite: "strict",
       maxAge: 432e5,
       path: "/",
@@ -192,6 +227,89 @@ app.post("/api/logout", (q, s) =>
 );
 app.use("/api", auth);
 app.get("/api/me", (q, s) => s.json({ user: q.u }));
+app.get(
+  "/api/docs/:id/progress",
+  h(async (q, s) => {
+    const id = Number(q.params.id);
+    if (!Number.isSafeInteger(id) || id < 1)
+      return err(s, 400, "Invalid document.");
+    const isAdmin = q.u.role === "admin";
+    const doc = (
+      await pool.query(
+        `select id from docs where id=? ${
+          isAdmin
+            ? ""
+            : "and (exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=docs.id and ra.username=?))"
+        }`,
+        isAdmin ? [id] : [id, q.u.u, q.u.u, q.u.u],
+      )
+    ).rows[0];
+    if (!doc) return err(s, 404, "Document not found.");
+    const progress = (
+      await pool.query(
+        "select row_position as saved_row from annotation_progress where doc_id=? and username=?",
+        [id, q.u.u],
+      )
+    ).rows[0];
+    s.json({ row: progress ? Number(progress.saved_row) : null });
+  }),
+);
+app.put(
+  "/api/docs/:id/progress",
+  h(async (q, s) => {
+    const id = Number(q.params.id),
+      row = q.body?.row;
+    if (
+      !Number.isSafeInteger(id) ||
+      id < 1 ||
+      !Number.isInteger(row) ||
+      row < 1
+    )
+      return err(s, 400, "Choose a valid document row.");
+    const doc = (
+      await pool.query(
+        `select body,assignee from docs where id=? ${
+          q.u.role === "admin"
+            ? ""
+            : "and (exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=docs.id and ra.username=?))"
+        }`,
+        q.u.role === "admin" ? [id] : [id, q.u.u, q.u.u, q.u.u],
+      )
+    ).rows[0];
+    if (!doc) return err(s, 404, "Document not found.");
+    const rowCount = doc.body.split(/\r\n|\r|\n/).length;
+    if (row > rowCount) return err(s, 400, "Choose a valid document row.");
+    if (q.u.role !== "admin") {
+      const rowAssignments = await pool.query(
+        "select row_start as start,row_end as end from row_assignments where doc_id=? and username=?",
+        [id, q.u.u],
+      );
+      const fullAccess =
+        !rowAssignments.rowCount &&
+        (doc.assignee === q.u.u ||
+          (
+            await pool.query(
+              "select 1 from doc_assignments where doc_id=? and username=?",
+              [id, q.u.u],
+            )
+          ).rowCount);
+      if (
+        !fullAccess &&
+        !rowAssignments.rows.some(
+          (assignment) => row >= assignment.start && row <= assignment.end,
+        )
+      )
+        return err(s, 403, "This row is not assigned to you.");
+    }
+    await pool.query(
+      `insert into annotation_progress(doc_id,username,row_position)
+       values(?,?,?)
+       on duplicate key update row_position=values(row_position),updated_at=current_timestamp`,
+      [id, q.u.u, row],
+    );
+    s.json({ ok: 1, row });
+  }),
+);
 app.post(
   "/api/password",
   h(async (q, s) => {
@@ -372,6 +490,17 @@ app.get(
        ${a ? "" : "where username=?"} order by doc_id,row_start`,
       a ? [] : [q.u.u],
     );
+    const progressRows = await pool.query(
+      `select doc_id,username,row_position as saved_row from annotation_progress
+       ${a ? "" : "where username=?"}`,
+      a ? [] : [q.u.u],
+    );
+    const progressByDoc = new Map();
+    for (const progress of progressRows.rows) {
+      const key = String(progress.doc_id);
+      if (!progressByDoc.has(key)) progressByDoc.set(key, {});
+      progressByDoc.get(key)[progress.username] = Number(progress.saved_row);
+    }
     const rowAssignmentsByDoc = new Map();
     for (const row of rowAssignments.rows) {
       const key = String(row.doc_id);
@@ -453,6 +582,7 @@ app.get(
         assignees: [...new Set([...(assignedByDoc.get(String(d.id)) || []), ...(d.assignee ? [d.assignee] : [])])],
         as: [...new Set([...(assignedByDoc.get(String(d.id)) || []), ...(d.assignee ? [d.assignee] : [])])].join(", "),
         rowAssignments: rowAssignmentsByDoc.get(String(d.id)) || [],
+        progressByUser: progressByDoc.get(String(d.id)) || {},
         done: !!d.done,
         review: d.review,
         note: d.note,
@@ -461,6 +591,28 @@ app.get(
         rowCount: d.body.split(/\r\n|\r|\n/).length,
       })),
     );
+  }),
+);
+app.get(
+  "/api/docs/:id/row-count",
+  h(async (q, s) => {
+    const id = Number(q.params.id);
+    if (!Number.isSafeInteger(id) || id < 1)
+      return err(s, 400, "Invalid document.");
+    const isAdmin = q.u.role === "admin";
+    const doc = (
+      await pool.query(
+        `select body from docs
+         where id=? ${
+           isAdmin
+             ? ""
+             : "and (exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=docs.id and ra.username=?))"
+         }`,
+        isAdmin ? [id] : [id, q.u.u, q.u.u, q.u.u],
+      )
+    ).rows[0];
+    if (!doc) return err(s, 404, "Document not found.");
+    s.json({ rowCount: doc.body.split(/\r\n|\r|\n/).length });
   }),
 );
 app.get(
@@ -733,71 +885,89 @@ app.delete(
 app.post(
   "/api/docs/:id/anns",
   h(async (q, s) => {
-    const id = +q.params.id,
+    const id = Number(q.params.id),
       { start: a, end: b, label } = q.body;
-    const d = (
-      await pool.query("select body,assignee from docs where id=?", [id])
-    ).rows[0];
-    if (!d)
-      return err(s, 404, "Document not found.");
+    if (!Number.isSafeInteger(id) || id < 1)
+      return err(s, 400, "Invalid document.");
     if (
       !Number.isInteger(a) ||
       !Number.isInteger(b) ||
       a < 0 ||
-      b <= a ||
-      b > d.body.length
+      b <= a
     )
       return err(s, 400, "Invalid selection.");
-    if (q.u.role !== "admin") {
-      const assignedRows = await pool.query(
-        "select 1 from row_assignments where doc_id=? and username=? limit 1",
-        [id, q.u.u],
-      );
-      const fullAccess =
-        !assignedRows.rowCount &&
-        (d.assignee === q.u.u ||
-          (
-            await pool.query(
-              "select 1 from doc_assignments where doc_id=? and username=?",
-              [id, q.u.u],
-            )
-          ).rowCount);
-      const startRow = rowForOffset(d.body, a),
-        endRow = rowForOffset(d.body, b - 1);
-      if (
-        !fullAccess &&
-        (startRow !== endRow ||
-          !(await pool.query(
-            "select 1 from row_assignments where doc_id=? and username=? and row_start<=? and row_end>=?",
-            [id, q.u.u, startRow, startRow],
-          )).rowCount)
-      )
-        return err(s, 403, "This row is not assigned to you.");
-    }
-    if (
-      (
-        await pool.query("select 1 from anns where doc_id=? and ?<e and ?>s", [
-          id,
-          a,
-          b,
-        ])
-      ).rowCount
-    )
-      return err(
-        s,
-        409,
-        "That text overlaps an existing entity. Remove it first.",
-      );
+    const c = await pool.connect();
     try {
-      await pool.query(
+      await c.begin();
+      const d = (
+        await c.query("select body,assignee from docs where id=? for update", [
+          id,
+        ])
+      ).rows[0];
+      if (!d) {
+        await c.rollback();
+        return err(s, 404, "Document not found.");
+      }
+      if (b > d.body.length) {
+        await c.rollback();
+        return err(s, 400, "Invalid selection.");
+      }
+      if (q.u.role !== "admin") {
+        const assignedRows = await c.query(
+          "select 1 from row_assignments where doc_id=? and username=? limit 1",
+          [id, q.u.u],
+        );
+        const fullAccess =
+          !assignedRows.rowCount &&
+          (d.assignee === q.u.u ||
+            (
+              await c.query(
+                "select 1 from doc_assignments where doc_id=? and username=?",
+                [id, q.u.u],
+              )
+            ).rowCount);
+        const startRow = rowForOffset(d.body, a),
+          endRow = rowForOffset(d.body, b - 1);
+        if (
+          !fullAccess &&
+          (startRow !== endRow ||
+            !(await c.query(
+              "select 1 from row_assignments where doc_id=? and username=? and row_start<=? and row_end>=?",
+              [id, q.u.u, startRow, startRow],
+            )).rowCount)
+        ) {
+          await c.rollback();
+          return err(s, 403, "This row is not assigned to you.");
+        }
+      }
+      if (
+        (
+          await c.query(
+            "select 1 from anns where doc_id=? and ?<e and ?>s limit 1",
+            [id, a, b],
+          )
+        ).rowCount
+      ) {
+        await c.rollback();
+        return err(
+          s,
+          409,
+          "That text overlaps an existing entity. Remove it first.",
+        );
+      }
+      const inserted = await c.query(
         "insert into anns(doc_id,s,e,label,author) values(?,?,?,?,?)",
         [id, a, b, label, q.u.u],
       );
-      s.json({ ok: 1 });
+      await c.commit();
+      s.json({ ok: 1, id: String(inserted.insertId) });
     } catch (e) {
+      await c.rollback();
       if (e.code === "ER_NO_REFERENCED_ROW_2")
         return err(s, 400, "Unknown label.");
       throw e;
+    } finally {
+      c.release();
     }
   }),
 );
@@ -1042,6 +1212,17 @@ app.post(
     constraint row_assignments_doc_fk foreign key(doc_id) references docs(id) on delete cascade,
     constraint row_assignments_user_fk foreign key(username) references users(username) on delete cascade
   ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
+  await pool.query(`create table if not exists annotation_progress (
+    doc_id bigint unsigned not null,
+    username varchar(32) not null,
+    row_position int unsigned not null,
+    updated_at timestamp not null default current_timestamp on update current_timestamp,
+    primary key(doc_id,username),
+    constraint annotation_progress_doc_fk foreign key(doc_id)
+      references docs(id) on delete cascade,
+    constraint annotation_progress_user_fk foreign key(username)
+      references users(username) on delete cascade
+  ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
   await pool.query(`create table if not exists import_chunks (
     upload_id char(36) not null,
     username varchar(32) not null,
@@ -1065,18 +1246,24 @@ app.post(
     constraint anns_label_fk foreign key (label)
       references labels(name)
   ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci`);
-  await pool.query("update users set user_role='admin' where username=?", [
-    process.env.ADMIN_USER || "admin",
-  ]);
-  if (!(await pool.query("select 1 from users")).rowCount)
+  if (!(await pool.query("select 1 from users")).rowCount) {
+    const adminUser = process.env.ADMIN_USER || "admin";
+    const adminPassword = process.env.ADMIN_PASSWORD || "";
+    if (!/^[\w.-]{3,32}$/.test(adminUser))
+      throw new Error("ADMIN_USER must be 3-32 letters, digits, dots, underscores, or hyphens.");
+    if (adminPassword.length < 12)
+      throw new Error(
+        "Set ADMIN_PASSWORD to a unique password of at least 12 characters to create the first admin.",
+      );
     await pool.query(
       "insert into users(username,pass,user_role) values(?,?,?)",
       [
-        process.env.ADMIN_USER || "admin",
-        await bcrypt.hash(process.env.ADMIN_PASSWORD || "admin123", 10),
+        adminUser,
+        await bcrypt.hash(adminPassword, 10),
         "admin",
       ],
     );
+  }
   if (!(await pool.query("select 1 from labels")).rowCount)
     await pool.query(
       "insert into labels(name,color) values('PER','#ef4444'),('LOC','#10b981'),('ORG','#3b82f6')",
@@ -1086,7 +1273,9 @@ app.post(
       return err(s, 413, "Request is too large. Large files are uploaded in smaller chunks.");
     n(e);
   });
-  app.listen(process.env.PORT || 3000, () => console.log("API ready"));
+  const host =
+    process.env.BIND_ADDRESS || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
+  app.listen(process.env.PORT || 3000, host, () => console.log("API ready"));
 })().catch((e) => {
   console.error(e);
   process.exit(1);

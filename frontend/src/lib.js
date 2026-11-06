@@ -1,4 +1,4 @@
-let snapOn = true;
+let snapOn = false;
 export const setSnap = (v) => {
   snapOn = v;
 };
@@ -74,6 +74,11 @@ const KM = {
   "Change password": "ប្តូរពាក្យសម្ងាត់",
   "Select text to tag it with the chosen label. Keys 1-9 pick a label.":
     "ជ្រើសអត្ថបទ រួចជ្រើសស្លាក។ ចុចលេខ 1-9 ដើម្បីជ្រើសស្លាក។",
+  "Select text, then press Enter to use the selected label or 1-9 to tag with a label. Page Up/Down moves between rows. Progress saves automatically.":
+    "ជ្រើសអត្ថបទ រួចចុច Enter ដើម្បីដាក់ស្លាកដែលបានជ្រើស ឬចុច 1-9 ដើម្បីដាក់ស្លាក។ Page Up/Down ដើម្បីប្តូរជួរ។ វឌ្ឍនភាពត្រូវបានរក្សាទុកដោយស្វ័យប្រវត្តិ។",
+  "Saving progress...": "កំពុងរក្សាទុកវឌ្ឍនភាព...",
+  "Progress saved": "បានរក្សាទុកវឌ្ឍនភាព",
+  "Progress save failed": "រក្សាទុកវឌ្ឍនភាពមិនបានសម្រេច",
   "Choose a label for selected text:": "ជ្រើសស្លាកសម្រាប់អត្ថបទដែលបានជ្រើស៖",
   "Your password is weak. Change it in Account.":
     "ពាក្យសម្ងាត់របស់អ្នកខ្សោយ។ សូមប្តូរនៅក្នុងគណនី។",
@@ -97,13 +102,13 @@ function segs(t) {
   }
 }
 function snap(t, st, en) {
-  if (snapOn)
-    for (const g of segs(t)) {
-      const a = g.index,
-        b = a + g.segment.length;
-      if (st >= a && st < b) st = a;
-      if (en > a && en <= b) en = b;
-    }
+  if (!snapOn) return [st, en];
+  for (const g of segs(t)) {
+    const a = g.index,
+      b = a + g.segment.length;
+    if (st >= a && st < b) st = a;
+    if (en > a && en <= b) en = b;
+  }
   while (st > 0 && isMk(t[st])) st--;
   while (en < t.length && isMk(t[en])) en++;
   return [st, en];

@@ -1,0 +1,27 @@
+[Unit]
+Description=Khmer NER API
+After=network.target mysql.service
+Requires=mysql.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/khmer-ner/backend
+EnvironmentFile=/etc/khmer-ner.env
+Environment=NODE_ENV=production
+Environment=COOKIE_SECURE=true
+Environment=BIND_ADDRESS=127.0.0.1
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

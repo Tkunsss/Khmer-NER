@@ -20,6 +20,41 @@ const stt = (d, L) =>
           ? "Done"
           : "In progress",
   );
+const textLengthWithoutLabels = (node) => {
+  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue.length;
+  if (node.nodeType === Node.ELEMENT_NODE && node.tagName === "SUP") return 0;
+  return [...node.childNodes].reduce(
+    (length, child) => length + textLengthWithoutLabels(child),
+    0,
+  );
+};
+const selectionOffset = (root, target, targetOffset) => {
+  let length = 0;
+  const visit = (node) => {
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === "SUP")
+      return false;
+    if (node === target) {
+      length +=
+        node.nodeType === Node.TEXT_NODE
+          ? targetOffset
+          : [...node.childNodes]
+              .slice(0, targetOffset)
+              .reduce(
+                (total, child) => total + textLengthWithoutLabels(child),
+                0,
+              );
+      return true;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      length += node.nodeValue.length;
+      return false;
+    }
+    for (const child of node.childNodes)
+      if (visit(child)) return true;
+    return false;
+  };
+  return visit(root) ? Number(root.dataset.o) + length : null;
+};
 
 export default function App() {
   const [lang, setLang] = useState(() => {
@@ -40,7 +75,7 @@ export default function App() {
   const [docDetails, setDocDetails] = useState({});
   const docDetailsRef = useRef(docDetails);
   const [qf, setQf] = useState(""),
-    [snapOn, setSnapOn] = useState(true);
+    [snapOn, setSnapOn] = useState(false);
   // Pop-up messages (toasts): always visible on screen, so nobody has to scroll up.
   const [toasts, setToasts] = useState([]),
     timers = useRef({});
@@ -805,6 +840,24 @@ function assignedRows(d, username) {
   return [];
 }
 
+function rowCompletion(docs, username) {
+  return docs.reduce(
+    (total, doc) => {
+      const progress = Number(doc.progressByUser?.[username]) || 0;
+      for (const range of assignedRows(doc, username)) {
+        const end = range.end || doc.rowCount || range.start;
+        total.assigned += Math.max(0, end - range.start + 1);
+        total.completed += Math.max(
+          0,
+          Math.min(end, progress) - range.start + 1,
+        );
+      }
+      return total;
+    },
+    { completed: 0, assigned: 0 },
+  );
+}
+
 function annotationCount(doc) {
   return doc.annCount ?? doc.anns?.length ?? null;
 }
@@ -841,6 +894,7 @@ function Tasks() {
       d.as === me.u ||
       d.rowAssignments?.some((assignment) => assignment.username === me.u),
   );
+  const myRowProgress = rowCompletion(myDocs, me.u);
   return (
     <>
       {A && (
@@ -867,6 +921,7 @@ function Tasks() {
                         (assignment) => assignment.username === u.u,
                       ),
                   );
+                  const rows = rowCompletion(d, u.u);
                   return (
                     <tr key={u.u}>
                       <td>{u.u}</td>
@@ -889,14 +944,13 @@ function Tasks() {
                       <td>
                         {d.filter((x) => x.done).length}/{d.length}
                       </td>
-                      <td>{annotationTotal(d)}</td>
+                      <td>{annotationTotal(d)}                      </td>
                       <td>
-                        {d.length
-                          ? Math.round(
-                              (d.filter((x) => x.done).length / d.length) * 100,
-                            )
+                        {rows.completed}/{rows.assigned} (
+                        {rows.assigned
+                          ? Math.round((rows.completed / rows.assigned) * 100)
                           : 0}
-                        %
+                        %)
                       </td>
                     </tr>
                   );
@@ -944,14 +998,14 @@ function Tasks() {
                     {annotationTotal(myDocs)}
                   </td>
                   <td>
-                    {myDocs.length
+                    {myRowProgress.completed}/{myRowProgress.assigned} (
+                    {myRowProgress.assigned
                       ? Math.round(
-                          (myDocs.filter((d) => d.done).length /
-                            myDocs.length) *
+                          (myRowProgress.completed / myRowProgress.assigned) *
                             100,
                         )
                       : 0}
-                    %
+                    %)
                   </td>
                 </tr>
               </tbody>
@@ -1095,8 +1149,13 @@ function Annotate() {
     box = useRef(null),
     [lineIndex, setLineIndex] = useState(0),
     [lineInput, setLineInput] = useState("1"),
+    [progressLoadedFor, setProgressLoadedFor] = useState(null),
+    [progressStatus, setProgressStatus] = useState(""),
     [annotationPage, setAnnotationPage] = useState(0),
     [pending, setPending] = useState(null),
+    annotationSaves = useRef(new Set()),
+    progressSaveQueue = useRef(Promise.resolve()),
+    progressSaveSequence = useRef(0),
     d = docDetails[cur];
   const lines = useMemo(
       () => (d ? documentLines(d.text) : []),
@@ -1111,17 +1170,56 @@ function Annotate() {
       Math.max(0, Math.ceil(a.length / 100) - 1),
     );
   useEffect(() => {
-    // Annotators start on the first row that was assigned to them.
+    if (!d || !cur || !me?.u) return;
+    let active = true;
+    const key = `${me.u}:${cur}`;
     const mine = (d?.rowAssignments || []).filter((x) => x.username === me.u);
     const first =
       me.role !== "admin" && mine.length
         ? Math.min(...mine.map((x) => x.start))
         : 1;
-    setLineIndex(first - 1);
-    setLineInput(String(first));
+    const fullDocumentAssigned =
+      me.role === "admin" ||
+      (!mine.length &&
+        (d.assignees || (d.as ? [d.as] : [])).includes(me.u));
+    setProgressLoadedFor(null);
+    setProgressStatus("");
     setAnnotationPage(0);
     setPending(null);
-  }, [cur]);
+    const restoreProgress = async () => {
+      let row = first;
+      try {
+        const saved = await api(
+          "GET",
+          "/docs/" + encodeURIComponent(cur) + "/progress",
+        );
+        if (
+          Number.isInteger(saved.row) &&
+          saved.row >= 1 &&
+          saved.row <= lines.length &&
+          (fullDocumentAssigned ||
+            mine.some(
+              (assignment) =>
+                saved.row >= assignment.start && saved.row <= assignment.end,
+            ))
+        )
+          row = saved.row;
+      } catch (error) {
+        notify(
+          error.message || "Could not load saved progress. Starting at the first assigned row.",
+          "danger",
+        );
+      }
+      if (!active) return;
+      setLineIndex(row - 1);
+      setLineInput(String(row));
+      setProgressLoadedFor(key);
+    };
+    void restoreProgress();
+    return () => {
+      active = false;
+    };
+  }, [cur, d?.id, me?.u]);
   const undo = () => {
     if (!d) return;
     const m = d.anns.filter((n) => n.by === me.u);
@@ -1175,7 +1273,16 @@ function Annotate() {
     // Show the new entity at once; save in the background, then sync with the server.
     const { start, end } = pending,
       docId = d.id,
-      temp = { id: "tmp-" + Date.now(), s: start, e: end, l: label, by: me.u };
+      saveKey = `${docId}:${start}:${end}`,
+      temp = {
+        id: "tmp-" + crypto.randomUUID(),
+        s: start,
+        e: end,
+        l: label,
+        by: me.u,
+      };
+    if (annotationSaves.current.has(saveKey)) return;
+    annotationSaves.current.add(saveKey);
     setPending(null);
     getSelection()?.removeAllRanges();
     updateDocDetail(d.id, (current) => ({
@@ -1201,15 +1308,37 @@ function Annotate() {
           ),
         }));
       })
-      .catch((error) => {
+      .catch(async (error) => {
         updateDocDetail(docId, (current) => ({
           ...current,
           anns: current.anns.filter(
             (annotation) => annotation.id !== temp.id,
           ),
         }));
-        notify(error.message || "Could not save the entity.", "danger");
-      });
+        if (/overlaps an existing entity/i.test(error.message || "")) {
+          try {
+            const latest = await api(
+              "GET",
+              "/docs/" + encodeURIComponent(docId),
+            );
+            updateDocDetail(docId, () => latest);
+            notify(
+              "Another annotation overlaps that text. The document was refreshed; select a different span.",
+              "info",
+            );
+          } catch (refreshError) {
+            notify(
+              `That text overlaps an existing annotation. Could not refresh the document: ${
+                refreshError.message || "request failed"
+              }`,
+              "danger",
+            );
+          }
+        } else {
+          notify(error.message || "Could not save the entity.", "danger");
+        }
+      })
+      .finally(() => annotationSaves.current.delete(saveKey));
   };
   useEffect(() => {
     const k = (e) => {
@@ -1217,11 +1346,30 @@ function Annotate() {
       if (e.key === "Escape" && pending) {
         setPending(null);
         getSelection()?.removeAllRanges();
+      } else if (e.key === "Enter" && pending) {
+        const label =
+          db.labels.find((item) => item.n === act)?.n || db.labels[0]?.n;
+        if (label) {
+          e.preventDefault();
+          chooseLabel(label);
+        }
       } else if (/^[1-9]$/.test(e.key) && db.labels[e.key - 1])
         chooseLabel(db.labels[e.key - 1].n);
       else if ((e.ctrlKey || e.metaKey) && e.key === "z") {
         e.preventDefault();
         undo();
+      } else if (e.key === "PageDown" && d && !pending) {
+        const row = stepRow(lineIndex + 1, 1);
+        if (row !== null) {
+          e.preventDefault();
+          goRow(row);
+        }
+      } else if (e.key === "PageUp" && d && !pending) {
+        const row = stepRow(lineIndex + 1, -1);
+        if (row !== null) {
+          e.preventDefault();
+          goRow(row);
+        }
       }
     };
     document.addEventListener("keydown", k);
@@ -1256,9 +1404,41 @@ function Annotate() {
         ? lines.length
         : Math.max(...myRowAssignments.map((assignment) => assignment.end));
   const goRow = (row) => {
+    if (!d || !cur || progressLoadedFor !== `${me.u}:${cur}`) return;
     setPending(null);
     setLineIndex(row - 1);
     setLineInput(String(row));
+    const sequence = ++progressSaveSequence.current;
+    setProgressStatus("saving");
+    progressSaveQueue.current = progressSaveQueue.current
+      .catch(() => {})
+      .then(() =>
+        api("PUT", "/docs/" + encodeURIComponent(cur) + "/progress", { row }),
+      )
+      .then(() => {
+        setDb((current) => ({
+          ...current,
+          docs: current.docs.map((doc) =>
+            doc.id === cur
+              ? {
+                  ...doc,
+                  progressByUser: {
+                    ...doc.progressByUser,
+                    [me.u]: row,
+                  },
+                }
+              : doc,
+          ),
+        }));
+        if (sequence === progressSaveSequence.current)
+          setProgressStatus("saved");
+      })
+      .catch((error) => {
+        if (sequence === progressSaveSequence.current) {
+          setProgressStatus("error");
+          notify(error.message || "Could not save progress.", "danger");
+        }
+      });
   };
   // Next / previous row the person may work on (skips rows assigned to others).
   const unrestricted =
@@ -1288,13 +1468,22 @@ function Annotate() {
       const s = getSelection();
       if (!s.rangeCount || s.isCollapsed || !cl) return;
       const r = s.getRangeAt(0),
-        A = r.startContainer.parentElement?.closest("[data-o]"),
-        B = r.endContainer.parentElement?.closest("[data-o]"),
+        startElement =
+          r.startContainer.nodeType === Node.ELEMENT_NODE
+            ? r.startContainer
+            : r.startContainer.parentElement,
+        endElement =
+          r.endContainer.nodeType === Node.ELEMENT_NODE
+            ? r.endContainer
+            : r.endContainer.parentElement,
+        A = startElement?.closest("[data-o]"),
+        B = endElement?.closest("[data-o]"),
         bx = box.current;
       if (!A || !B || !bx.contains(A) || !bx.contains(B)) return;
       const t = d.text;
-      let st = +A.dataset.o + r.startOffset,
-        en = +B.dataset.o + r.endOffset;
+      let st = selectionOffset(A, r.startContainer, r.startOffset),
+        en = selectionOffset(B, r.endContainer, r.endOffset);
+      if (st === null || en === null) return;
       if (
         !rowAssigned(rowForOffset(t, st)) ||
         rowForOffset(t, en - 1) !== rowForOffset(t, st)
@@ -1304,6 +1493,10 @@ function Annotate() {
       while (en > st && /\s/.test(t[en - 1])) en--;
       [st, en] = snap(t, st, en);
       if (en <= st) return;
+      if (a.some((annotation) => st < annotation.e && en > annotation.s)) {
+        notify("That text overlaps an existing entity. Remove it first.", "danger");
+        return;
+      }
       const rect = r.getBoundingClientRect(),
         left = Math.max(8, Math.min(rect.left, window.innerWidth - 260)),
         top =
@@ -1320,7 +1513,8 @@ function Annotate() {
     (n) => {
       const start = Math.max(n.s, currentLine.start),
         end = Math.min(n.e, currentLine.end);
-      if (start > o)
+    if (start < o) return;
+    if (start > o)
         parts.push(
           <span key={"t" + o} data-o={o}>
             {d.text.slice(o, start)}
@@ -1407,6 +1601,7 @@ function Annotate() {
                   : "")
               }
               title={L("Go to row") + " " + r.start}
+              disabled={progressLoadedFor !== `${me.u}:${cur}`}
               onClick={() => goRow(r.start)}
             >
               {L("Rows")} {r.start}–{r.end}
@@ -1426,15 +1621,29 @@ function Annotate() {
               ? L("assigned to you")
               : L("not assigned to you")}
           </span>
+          {progressStatus && (
+            <span className="mut" role="status">
+              {L(
+                progressStatus === "saving"
+                  ? "Saving progress..."
+                  : progressStatus === "saved"
+                    ? "Progress saved"
+                    : "Progress save failed",
+              )}
+            </span>
+          )}
         </div>
         <p className="mut" style={{ margin: "4px 0" }}>
           {L(
-            "Select text to tag it with the chosen label. Keys 1-9 pick a label.",
+            "Select text, then press Enter to use the selected label or 1-9 to tag with a label. Page Up/Down moves between rows. Progress saves automatically.",
           )}
         </p>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <button
-            disabled={stepRow(currentLineIndex + 1, -1) === null}
+            disabled={
+              progressLoadedFor !== `${me.u}:${cur}` ||
+              stepRow(currentLineIndex + 1, -1) === null
+            }
             onClick={() => goRow(stepRow(currentLineIndex + 1, -1))}
           >
             {L("Previous")}
@@ -1446,8 +1655,7 @@ function Annotate() {
               e.preventDefault();
               const row = Number(lineInput);
               if (Number.isInteger(row) && row >= 1 && row <= rowLimit) {
-                setPending(null);
-                setLineIndex(row - 1);
+                goRow(row);
               }
             }}
           >
@@ -1467,6 +1675,7 @@ function Annotate() {
             <button
               type="submit"
               disabled={
+                progressLoadedFor !== `${me.u}:${cur}` ||
                 !Number.isInteger(Number(lineInput)) ||
                 Number(lineInput) < 1 ||
                 Number(lineInput) > rowLimit
@@ -1476,7 +1685,10 @@ function Annotate() {
             </button>
           </form>
           <button
-            disabled={stepRow(currentLineIndex + 1, 1) === null}
+            disabled={
+              progressLoadedFor !== `${me.u}:${cur}` ||
+              stepRow(currentLineIndex + 1, 1) === null
+            }
             onClick={() => goRow(stepRow(currentLineIndex + 1, 1))}
           >
             {L("Next")}
@@ -2084,13 +2296,8 @@ function IO() {
       setPreparingExport(false);
     }
   };
-  const imp = async (raw, name) => {
-    if (!raw.trim()) {
-      setMsg("There is no text to import.");
-      return;
-    }
-    let items,
-      labs = [];
+  const parseImport = (raw, name) => {
+    let items, labels = [];
     try {
       const parsed = JSON.parse(raw);
       const values = Array.isArray(parsed)
@@ -2109,7 +2316,7 @@ function IO() {
         )
       ) {
         if (!Array.isArray(parsed) && Array.isArray(parsed.labels))
-          labs = parsed.labels;
+          labels = parsed.labels;
         items = values.map((item, i) =>
           typeof item === "string"
             ? { title: name + " #" + (i + 1), text: item }
@@ -2128,97 +2335,127 @@ function IO() {
     if (!items) {
       items = [{ title: name, text: raw }];
     }
-    try {
-      const r = await api("POST", "/import", {
-        labels: labs,
-        docs: items.filter((x) => x.text.trim()),
-      });
-      setMsg("Imported " + r.count + " document(s).");
-      if (name === "Pasted") setTa("");
-    } catch (e) {
-      setMsg(e.message);
-    }
-  };
-  const files = async (fs) => {
-    for (const f of [...fs]) {
-      if (f.size > 4 * 1024 * 1024) {
-        const uploadId = crypto.randomUUID(),
-          chunkBytes = 1024 * 1024,
-          concurrentChunks = 4,
-          decoder = new TextDecoder("utf-8");
-        let index = 0;
-        for (
-          let offset = 0;
-          offset < f.size;
-          offset += chunkBytes * concurrentChunks
-        ) {
-          const batch = Array.from(
-            {
-              length: Math.min(
-                concurrentChunks,
-                Math.ceil((f.size - offset) / chunkBytes),
-              ),
-            },
-            (_, i) => {
-              const start = offset + i * chunkBytes;
-              const end = Math.min(start + chunkBytes, f.size);
-              return { end, bytes: f.slice(start, end).arrayBuffer() };
-            },
-          );
-          const buffers = await Promise.all(batch.map((chunk) => chunk.bytes));
-          const requests = [];
-          for (let i = 0; i < batch.length; i++) {
-            const { end } = batch[i];
-            const chunk = decoder.decode(buffers[i], { stream: end < f.size });
-            if (chunk)
-              requests.push(
-                api("POST", "/import/chunk", {
-                  uploadId,
-                  index: index++,
-                  chunk,
-                }),
-              );
-          }
-          await Promise.all(requests);
-          const uploaded = batch[batch.length - 1].end;
-          setImportProgress(
-            `Uploading ${f.name}: ${Math.round((uploaded / f.size) * 100)}%`,
-          );
-        }
-        const rest = decoder.decode();
-        if (rest)
-          await api("POST", "/import/chunk", {
-            uploadId,
-            index: index++,
-            chunk: rest,
-          });
-        setImportProgress(`Finishing import: ${f.name}`);
-        const r = await api("POST", "/import/finish", {
-          uploadId,
-          chunks: index,
-          title: f.name,
-        });
-        setMsg("Imported " + r.count + " document(s).");
-        continue;
-      }
-      const raw = await new Promise((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.onerror = () => reject(r.error || new Error("Unable to read file."));
-        r.readAsText(f);
-      });
-      await imp(raw, f.name);
-    }
+    return { labels, docs: items.filter((item) => item.text.trim()) };
   };
   const doImport = async () => {
     setImporting(true);
     setImportProgress("");
+    let docs = [],
+      labels = [],
+      importedCount = 0;
+    const maxBatchBytes = 8 * 1024 * 1024;
+    const payloadBytes = (nextDocs, nextLabels) =>
+      new TextEncoder().encode(
+        JSON.stringify({ labels: nextLabels, docs: nextDocs }),
+      ).byteLength;
+    const flush = async () => {
+      if (!docs.length) return;
+      const result = await api("POST", "/import", { labels, docs });
+      importedCount += result.count;
+      docs = [];
+      labels = [];
+    };
+    const addImport = async (raw, name) => {
+      const parsed = parseImport(raw, name);
+      if (!parsed.docs.length) return;
+      if (
+        docs.length &&
+        payloadBytes([...docs, ...parsed.docs], [...labels, ...parsed.labels]) >
+          maxBatchBytes
+      )
+        await flush();
+      const nextDocs = [...docs, ...parsed.docs];
+      const nextLabels = [...labels, ...parsed.labels];
+      if (payloadBytes(nextDocs, nextLabels) > maxBatchBytes)
+        throw new Error(
+          `Import "${name}" is too large for a single request. Split it into smaller files.`,
+        );
+      docs = nextDocs;
+      labels = nextLabels;
+    };
+    const uploadLargeFile = async (file) => {
+      const uploadId = crypto.randomUUID(),
+        chunkBytes = 1024 * 1024,
+        concurrentChunks = 4,
+        decoder = new TextDecoder("utf-8");
+      let index = 0;
+      for (let offset = 0; offset < file.size; offset += chunkBytes * concurrentChunks) {
+        const batch = Array.from(
+          {
+            length: Math.min(
+              concurrentChunks,
+              Math.ceil((file.size - offset) / chunkBytes),
+            ),
+          },
+          (_, i) => {
+            const start = offset + i * chunkBytes;
+            const end = Math.min(start + chunkBytes, file.size);
+            return { end, bytes: file.slice(start, end).arrayBuffer() };
+          },
+        );
+        const buffers = await Promise.all(batch.map((chunk) => chunk.bytes));
+        const requests = [];
+        for (let i = 0; i < batch.length; i++) {
+          const { end } = batch[i];
+          const chunk = decoder.decode(buffers[i], { stream: end < file.size });
+          if (chunk)
+            requests.push(
+              api("POST", "/import/chunk", {
+                uploadId,
+                index: index++,
+                chunk,
+              }),
+            );
+        }
+        await Promise.all(requests);
+        const uploaded = batch[batch.length - 1].end;
+        setImportProgress(
+          `Uploading ${file.name}: ${Math.round((uploaded / file.size) * 100)}%`,
+        );
+      }
+      const rest = decoder.decode();
+      if (rest)
+        await api("POST", "/import/chunk", {
+          uploadId,
+          index: index++,
+          chunk: rest,
+        });
+      setImportProgress(`Finishing import: ${file.name}`);
+      const result = await api("POST", "/import/finish", {
+        uploadId,
+        chunks: index,
+        title: file.name,
+      });
+      importedCount += result.count;
+    };
     try {
-      if (selectedFiles.length) await files(selectedFiles);
-      if (ta.trim()) await imp(ta, "Pasted");
+      for (const file of selectedFiles) {
+        setImportProgress(`Preparing ${file.name}`);
+        if (file.size > 4 * 1024 * 1024) {
+          await flush();
+          await uploadLargeFile(file);
+          continue;
+        }
+        const raw = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () =>
+            reject(reader.error || new Error("Unable to read file."));
+          reader.readAsText(file);
+        });
+        await addImport(raw, file.name);
+      }
+      if (ta.trim()) await addImport(ta, "Pasted");
+      await flush();
+      if (!importedCount) {
+        setMsg("There is no text to import.");
+        return;
+      }
+      setMsg("Imported " + importedCount + " document(s).");
+      if (ta.trim()) setTa("");
       void load(me.role);
     } catch (error) {
-      setMsg("Could not read file: " + error.message);
+      setMsg("Could not import: " + error.message);
     } finally {
       setSelectedFiles([]);
       if (fileInput.current) fileInput.current.value = "";

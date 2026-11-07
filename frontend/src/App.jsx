@@ -278,10 +278,16 @@ export default function App() {
     <C.Provider value={X}>
       <div className="w">
         <header>
-          <h1>Khmer NER Annotator</h1>
+          <div className="brand">
+            <div className="brand-logo">✎</div>
+            <h1>
+              Khmer NER Annotator
+              <span className="brand-sub">Khmer Named Entity Annotation</span>
+            </h1>
+          </div>
           <div className="row">
             <button onClick={toggle}>{lang === "km" ? "EN" : "ខ្មែរ"}</button>
-            <span>
+            <span className="user-pill">
               {me.u} ({rl(me.role)})
             </span>
             <button
@@ -317,6 +323,10 @@ export default function App() {
           ))}
         </div>
         <V />
+        <footer className="site-foot">
+          <span>Khmer NER Annotator</span>
+          <span>© 2026 Khmer NER Project. All rights reserved.</span>
+        </footer>
         <Toasts toasts={toasts} dismiss={dismiss} />
       </div>
     </C.Provider>
@@ -357,8 +367,10 @@ function Login({ onIn, lang, toggle }) {
     }
   };
   return (
-    <div className="card" style={{ maxWidth: 340, margin: "60px auto" }}>
-      <h1>Khmer NER Annotator</h1>
+    <div className="login-wrap">
+    <div className="card login-card">
+      <span className="login-tag">● KHMER NLP</span>
+      <h1 style={{ marginBottom: 18 }}>Khmer NER Annotator</h1>
       <div className="row">
         <input
           style={{ width: "100%" }}
@@ -390,6 +402,8 @@ function Login({ onIn, lang, toggle }) {
         <button onClick={toggle}>{lang === "km" ? "EN" : "ខ្មែរ"}</button>
       </div>
       <p className="err">{e}</p>
+    </div>
+    <div className="login-foot">NLP ● NAMED ENTITY RECOGNITION SYSTEM</div>
     </div>
   );
 }
@@ -1718,7 +1732,7 @@ function Annotate() {
                 <button
                   key={l.n}
                   className="chip"
-                  style={{ borderColor: l.c }}
+                  style={{ borderColor: l.c, background: l.c + "26" }}
                   onClick={() => chooseLabel(l.n)}
                 >
                   {i < 9 ? i + 1 + " " : ""}

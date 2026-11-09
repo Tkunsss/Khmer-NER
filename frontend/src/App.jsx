@@ -872,15 +872,15 @@ function rowCompletion(docs, username) {
   );
 }
 
-function annotationCount(doc) {
-  return doc.annCount ?? doc.anns?.length ?? null;
-}
-
-function annotationTotal(docs) {
-  const counts = docs.map(annotationCount);
-  return counts.some((count) => count === null)
-    ? "—"
-    : counts.reduce((total, count) => total + count, 0);
+function annotationCount(docs, username) {
+  return docs.reduce(
+    (total, doc) =>
+      total +
+      (doc.anns || []).filter(
+        (annotation) => !username || annotation.by === username,
+      ).length,
+    0,
+  );
 }
 
 function Tasks() {
@@ -958,7 +958,7 @@ function Tasks() {
                       <td>
                         {d.filter((x) => x.done).length}/{d.length}
                       </td>
-                      <td>{annotationTotal(d)}                      </td>
+                      <td>{annotationCount(d, u.u)}</td>
                       <td>
                         {rows.completed}/{rows.assigned} (
                         {rows.assigned
@@ -1008,9 +1008,7 @@ function Tasks() {
                   </td>
                   <td>{myDocs.filter((d) => d.done).length}</td>
                   <td>{myDocs.filter((d) => !d.done).length}</td>
-                  <td>
-                    {annotationTotal(myDocs)}
-                  </td>
+                  <td>{annotationCount(myDocs, me.u)}</td>
                   <td>
                     {myRowProgress.completed}/{myRowProgress.assigned} (
                     {myRowProgress.assigned
@@ -1063,7 +1061,7 @@ function Tasks() {
                     </>
                   )}
                 </td>
-                <td>{annotationCount(d) ?? "—"}</td>
+                <td>{annotationCount([d], A ? undefined : me.u)}</td>
                 <td>
                   <button
                     className="open"
@@ -1165,7 +1163,6 @@ function Annotate() {
     [lineInput, setLineInput] = useState("1"),
     [progressLoadedFor, setProgressLoadedFor] = useState(null),
     [progressStatus, setProgressStatus] = useState(""),
-    [annotationPage, setAnnotationPage] = useState(0),
     [pending, setPending] = useState(null),
     annotationSaves = useRef(new Set()),
     progressSaveQueue = useRef(Promise.resolve()),
@@ -1178,10 +1175,6 @@ function Annotate() {
     a = useMemo(
       () => (d ? [...d.anns].sort((x, y) => x.s - y.s) : []),
       [d?.anns],
-    ),
-    currentAnnotationPage = Math.min(
-      annotationPage,
-      Math.max(0, Math.ceil(a.length / 100) - 1),
     );
   useEffect(() => {
     if (!d || !cur || !me?.u) return;
@@ -1198,7 +1191,6 @@ function Annotate() {
         (d.assignees || (d.as ? [d.as] : [])).includes(me.u));
     setProgressLoadedFor(null);
     setProgressStatus("");
-    setAnnotationPage(0);
     setPending(null);
     const restoreProgress = async () => {
       let row = first;
@@ -1246,12 +1238,21 @@ function Annotate() {
       "Undo: last entity removed",
     );
   };
-  const adjustAnnotationCount = (amount) =>
+  const adjustAnnotationCount = (amount, annotation) =>
     setDb((current) => ({
       ...current,
       docs: current.docs.map((doc) =>
         doc.id === d.id && typeof doc.annCount === "number"
-          ? { ...doc, annCount: Math.max(0, doc.annCount + amount) }
+          ? {
+              ...doc,
+              annCount: Math.max(0, doc.annCount + amount),
+              anns:
+                amount > 0
+                  ? [...(doc.anns || []), annotation]
+                  : (doc.anns || []).filter(
+                      (item) => item.id !== annotation.id,
+                    ),
+            }
           : doc,
       ),
     }));
@@ -1269,7 +1270,7 @@ function Annotate() {
     }));
     try {
       await api("DELETE", "/anns/" + annotation.id);
-      adjustAnnotationCount(-1);
+      adjustAnnotationCount(-1, annotation);
       if (message) notify(message, "danger");
     } catch (error) {
       updateDocDetail(d.id, (current) => ({
@@ -1313,14 +1314,7 @@ function Annotate() {
               : annotation,
           ),
         }));
-        setDb((current) => ({
-          ...current,
-          docs: current.docs.map((doc) =>
-            doc.id === docId && typeof doc.annCount === "number"
-              ? { ...doc, annCount: doc.annCount + 1 }
-              : doc,
-          ),
-        }));
+        adjustAnnotationCount(1, { ...temp, id: String(result.id) });
       })
       .catch(async (error) => {
         updateDocDetail(docId, (current) => ({
@@ -1521,6 +1515,9 @@ function Annotate() {
     }, 50);
   const currentLineIndex = Math.min(lineIndex, lines.length - 1),
     currentLine = lines[currentLineIndex],
+    rowAnnotations = currentLine
+      ? a.filter((n) => n.e > currentLine.start && n.s < currentLine.end)
+      : [],
     parts = [];
   let o = currentLine.start;
   a.filter((n) => n.e > currentLine.start && n.s < currentLine.end).forEach(
@@ -1752,27 +1749,6 @@ function Annotate() {
         )}
       </div>
       <div className="card tw">
-        {a.length > 100 && (
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <button
-              disabled={currentAnnotationPage === 0}
-              onClick={() => setAnnotationPage((page) => page - 1)}
-            >
-              {L("Previous")}
-            </button>
-            <span className="mut">
-              {currentAnnotationPage * 100 + 1}–
-              {Math.min((currentAnnotationPage + 1) * 100, a.length)} /{" "}
-              {a.length}
-            </span>
-            <button
-              disabled={(currentAnnotationPage + 1) * 100 >= a.length}
-              onClick={() => setAnnotationPage((page) => page + 1)}
-            >
-              {L("Next")}
-            </button>
-          </div>
-        )}
         <table>
           <thead>
             <tr>
@@ -1783,12 +1759,7 @@ function Annotate() {
             </tr>
           </thead>
           <tbody>
-            {a
-              .slice(
-                currentAnnotationPage * 100,
-                (currentAnnotationPage + 1) * 100,
-              )
-              .map((n) => (
+            {rowAnnotations.map((n) => (
                 <tr key={n.id}>
                   <td>{d.text.slice(n.s, n.e)}</td>
                   <td>
@@ -1849,13 +1820,6 @@ function Annotate() {
                   </td>
                 </tr>
               ))}
-            {!a.length && (
-              <tr>
-                <td colSpan={4} className="mut">
-                  {L("No entities yet.")}
-                </td>
-              </tr>
-            )}
           </tbody>
         </table>
       </div>

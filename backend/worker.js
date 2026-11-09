@@ -1184,7 +1184,8 @@ async function handleApi(request, env, connection, body, user, setStage = () => 
     if (index === 0)
       await execute(
         connection,
-        "delete from import_chunks where datetime(created_at)<datetime('now','-1 day')",
+        "delete from import_chunks where username=? and datetime(created_at)<datetime('now','-1 day')",
+        [username],
       );
     const key = importChunkKey(username, uploadId, index);
     const bytes = encoder.encode(chunk);

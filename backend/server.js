@@ -1026,7 +1026,10 @@ app.post(
     )
       return err(s, 400, "Invalid import chunk.");
     if (index === 0)
-      await pool.query("delete from import_chunks where created_at < now() - interval 1 day");
+      await pool.query(
+        "delete from import_chunks where username=? and created_at < now() - interval 1 day",
+        [q.u.u],
+      );
     await pool.query(
       "insert into import_chunks(upload_id,username,chunk_index,chunk) values(?,?,?,?) on duplicate key update chunk=values(chunk),created_at=current_timestamp",
       [uploadId, q.u.u, index, chunk],

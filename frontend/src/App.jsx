@@ -2,7 +2,6 @@ import {
   createContext,
   useContext,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1509,7 +1508,7 @@ function Annotate() {
       : assignedRows(d, me.u)
   ).sort((x, y) => x.start - y.start);
   const myRowCount = myRanges.reduce((n, r) => n + (r.end - r.start + 1), 0);
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!pending || pending.manuallyPositioned || !picker.current) return;
 
     const padding = 8,

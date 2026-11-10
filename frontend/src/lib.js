@@ -41,6 +41,36 @@ const KM = {
   Open: "បើក",
   "Loading document...": "កំពុងផ្ទុកឯកសារ...",
   Delete: "លុប",
+  "Delete document?": "លុបឯកសារ?",
+  "Delete label?": "លុបស្លាក?",
+  "Delete user?": "លុបអ្នកប្រើប្រាស់?",
+  "Remove entity?": "ដកអង្គភាពចេញ?",
+  "Delete this document and all its annotations? This cannot be undone.":
+    "តើអ្នកចង់លុបឯកសារនេះ និងការដាក់ស្លាកទាំងអស់មែនទេ? មិនអាចត្រឡប់វិញបានទេ។",
+  "Delete this label? Entities that use it may be affected.":
+    "តើអ្នកចង់លុបស្លាកនេះមែនទេ? អង្គភាពដែលប្រើស្លាកនេះអាចរងផលប៉ះពាល់។",
+  "This user account will be deleted.":
+    "គណនីអ្នកប្រើប្រាស់នេះនឹងត្រូវបានលុប។",
+  "This entity will be removed from the document.":
+    "អង្គភាពនេះនឹងត្រូវបានដកចេញពីឯកសារ។",
+  "Are you sure you want to delete this label?":
+    "តើអ្នកប្រាកដថាចង់លុបស្លាកនេះមែនទេ?",
+  "Are you sure you want to delete this user?":
+    "តើអ្នកប្រាកដថាចង់លុបអ្នកប្រើប្រាស់នេះមែនទេ?",
+  "Are you sure you want to remove this annotation?":
+    "តើអ្នកប្រាកដថាចង់ដកការដាក់ស្លាកនេះចេញមែនទេ?",
+  "Loading annotation data...": "កំពុងផ្ទុកទិន្នន័យការដាក់ស្លាក...",
+  Retry: "ព្យាយាមម្តងទៀត",
+  "Type the exact document title to confirm deletion:":
+    "សូមវាយចំណងជើងឯកសារឲ្យត្រូវ ដើម្បីបញ្ជាក់ការលុប៖",
+  "Type the exact label name to confirm deletion:":
+    "សូមវាយឈ្មោះស្លាកឲ្យត្រូវ ដើម្បីបញ្ជាក់ការលុប៖",
+  "Type the exact username to confirm deletion:":
+    "សូមវាយឈ្មោះអ្នកប្រើប្រាស់ឲ្យត្រូវ ដើម្បីបញ្ជាក់ការលុប៖",
+  "Type the exact annotated text to confirm removal:":
+    "សូមវាយអត្ថបទដែលបានដាក់ស្លាកឲ្យត្រូវ ដើម្បីបញ្ជាក់ការដកចេញ៖",
+  "Name did not match. Nothing was deleted.":
+    "ឈ្មោះមិនត្រូវគ្នាទេ។ មិនបានលុបអ្វីទេ។",
   Remove: "ដកចេញ",
   Cancel: "បោះបង់",
   Approve: "អនុម័ត",

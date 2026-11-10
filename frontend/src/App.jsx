@@ -1,6 +1,7 @@
 import {
   createContext,
   useContext,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -107,6 +108,19 @@ export default function App() {
   };
   const L = (s) => (lang === "km" && KM[s]) || s,
     rl = (r) => (lang === "km" ? RL[r] : r);
+  const [confirmState, setConfirmState] = useState(null),
+    confirmResolve = useRef(null);
+  const ask = (options) =>
+    new Promise((resolve) => {
+      confirmResolve.current?.(false);
+      confirmResolve.current = resolve;
+      setConfirmState(options);
+    });
+  const closeConfirm = useCallback((answer) => {
+    confirmResolve.current?.(answer);
+    confirmResolve.current = null;
+    setConfirmState(null);
+  }, []);
   const replaceDocDetails = (details) => {
     docDetailsRef.current = details;
     setDocDetails(details);
@@ -124,31 +138,43 @@ export default function App() {
     docDetailsRef.current = next;
     setDocDetails(next);
   };
-  const loadAllDocDetails = async (documents = db.docs) => {
-    const missing = documents.filter(
-      (doc) => !docDetailsRef.current[doc.id],
-    );
-    const loaded = {};
-    let nextIndex = 0;
-    const worker = async () => {
-      while (nextIndex < missing.length) {
-        const doc = missing[nextIndex++];
-        loaded[doc.id] = await api(
-          "GET",
-          "/docs/" + encodeURIComponent(doc.id),
-        );
-      }
-    };
-    await Promise.all(
-      Array.from(
-        { length: Math.min(4, missing.length) },
-        () => worker(),
-      ),
-    );
-    const next = { ...docDetailsRef.current, ...loaded };
-    replaceDocDetails(next);
-    return next;
-  };
+  const loadAllDocDetails = useCallback(
+    async (documents = db.docs) => {
+      const loaded = Object.fromEntries(
+        documents
+          .filter(
+            (doc) =>
+              !docDetailsRef.current[doc.id] &&
+              typeof doc.text === "string" &&
+              Array.isArray(doc.anns),
+          )
+          .map((doc) => [doc.id, doc]),
+      );
+      const missing = documents.filter(
+        (doc) => !docDetailsRef.current[doc.id] && !loaded[doc.id],
+      );
+      let nextIndex = 0;
+      const worker = async () => {
+        while (nextIndex < missing.length) {
+          const doc = missing[nextIndex++];
+          loaded[doc.id] = await api(
+            "GET",
+            "/docs/" + encodeURIComponent(doc.id),
+          );
+        }
+      };
+      await Promise.all(
+        Array.from(
+          { length: Math.min(4, missing.length) },
+          () => worker(),
+        ),
+      );
+      const next = { ...docDetailsRef.current, ...loaded };
+      replaceDocDetails(next);
+      return next;
+    },
+    [db.docs],
+  );
   setSnap(snapOn);
   const toggle = () => {
     const n = lang === "km" ? "en" : "km";
@@ -241,6 +267,7 @@ export default function App() {
     putDocDetail,
     updateDocDetail,
     loadAllDocDetails,
+    ask,
   };
   if (!me)
     return (
@@ -260,6 +287,7 @@ export default function App() {
     T = [
       ["tasks", A ? "Documents" : "My documents"],
       ["annotate", "Annotate"],
+      ...(A ? [["data", "Data"]] : []),
       ...(A ? [["labels", "Labels"]] : []),
       ...(A ? [["users", "Users"]] : []),
       ["io", "Import / Export"],
@@ -268,7 +296,7 @@ export default function App() {
   const V = {
     tasks: Tasks,
     annotate: Annotate,
-    data: Data,
+    data: A ? Data : Tasks,
     labels: Labels,
     users: Users,
     io: IO,
@@ -328,8 +356,99 @@ export default function App() {
           <span>© 2026 Khmer NER Project. All rights reserved.</span>
         </footer>
         <Toasts toasts={toasts} dismiss={dismiss} />
+        <ConfirmDialog state={confirmState} onClose={closeConfirm} />
       </div>
     </C.Provider>
+  );
+}
+
+function ConfirmDialog({ state, onClose }) {
+  const { L } = useContext(C),
+    cancelRef = useRef(null),
+    inputRef = useRef(null),
+    [typedValue, setTypedValue] = useState("");
+  useEffect(() => {
+    setTypedValue("");
+    if (!state) return;
+    (state.requiredText ? inputRef.current : cancelRef.current)?.focus();
+    const onKey = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onClose(false);
+      } else if (
+        /^[1-9]$/.test(event.key) ||
+        event.key.startsWith("Page") ||
+        ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z")
+      ) {
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [state, onClose]);
+  if (!state) return null;
+  const canConfirm =
+    state.requiredText === undefined || typedValue === state.requiredText;
+  return (
+    <div className="confirm-backdrop" onMouseDown={() => onClose(false)}>
+      <div
+        className="confirm-box"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-title"
+        aria-describedby="confirm-msg"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="confirm-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="30" height="30">
+            <path
+              d="M12 3.2 22 20.5H2L12 3.2Z"
+              fill="currentColor"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinejoin="round"
+            />
+            <path
+              d="M12 10v4.4M12 17.2v.1"
+              stroke="#fff"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+            />
+          </svg>
+        </div>
+        <h3 id="confirm-title">
+          <span className="confirm-dot" aria-hidden="true" />
+          {L(state.title || "Are you sure?")}
+        </h3>
+        {state.message && <p id="confirm-msg">{L(state.message)}</p>}
+        {state.detail && <div className="confirm-detail">{state.detail}</div>}
+        {state.requiredText !== undefined && (
+          <label className="confirm-input-label">
+            {L(state.requiredPrompt)}
+            <input
+              ref={inputRef}
+              value={typedValue}
+              onChange={(event) => setTypedValue(event.target.value)}
+              autoComplete="off"
+              spellCheck="false"
+            />
+          </label>
+        )}
+        <div className="confirm-actions">
+          <button ref={cancelRef} onClick={() => onClose(false)}>
+            {L("Cancel")}
+          </button>
+          <button
+            className="p bad"
+            disabled={!canConfirm}
+            onClick={() => onClose(true)}
+          >
+            {L(state.confirmText || "Delete")}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -897,6 +1016,7 @@ function Tasks() {
       db,
       run,
       notify,
+      ask,
       qf,
       setQf,
       setDb,
@@ -1106,25 +1226,32 @@ function Tasks() {
                       className="danger"
                       onClick={async () => {
                         if (
-                          window.confirm(
-                            "Delete this document and all its annotations? This cannot be undone.",
-                          )
-                        ) {
-                          try {
-                            await api("DELETE", "/docs/" + d.id);
-                            setDb((current) => ({
-                              ...current,
-                              docs: current.docs.filter(
-                                (doc) => doc.id !== d.id,
-                              ),
-                            }));
-                            notify(`Deleted document: ${d.title}`, "danger");
-                          } catch (error) {
-                            notify(
-                              error.message || "Could not delete document.",
-                              "danger",
-                            );
-                          }
+                          !(await ask({
+                            title: "Delete document?",
+                            message:
+                              "Delete this document and all its annotations? This cannot be undone.",
+                            detail: d.title,
+                            confirmText: "Delete",
+                            requiredText: d.title,
+                            requiredPrompt:
+                              "Type the exact document title to confirm deletion:",
+                          }))
+                        )
+                          return;
+                        try {
+                          await api("DELETE", "/docs/" + d.id);
+                          setDb((current) => ({
+                            ...current,
+                            docs: current.docs.filter(
+                              (doc) => doc.id !== d.id,
+                            ),
+                          }));
+                          notify(`Deleted document: ${d.title}`, "danger");
+                        } catch (error) {
+                          notify(
+                            error.message || "Could not delete document.",
+                            "danger",
+                          );
                         }
                       }}
                     >
@@ -1158,6 +1285,7 @@ function Annotate() {
       docDetails,
       updateDocDetail,
       notify,
+      ask,
       cur,
       act,
       setAct,
@@ -1420,6 +1548,27 @@ function Annotate() {
     document.addEventListener("keydown", k);
     return () => document.removeEventListener("keydown", k);
   });
+  useEffect(() => {
+    if (!pending || pending.manuallyPositioned || !picker.current) return;
+
+    const padding = 8,
+      gap = 8,
+      pickerRect = picker.current.getBoundingClientRect(),
+      maxLeft = Math.max(padding, window.innerWidth - pickerRect.width - padding),
+      maxTop = Math.max(padding, window.innerHeight - pickerRect.height - padding),
+      left = Math.max(padding, Math.min(pending.anchorLeft, maxLeft)),
+      below = pending.anchorBottom + gap,
+      above = pending.anchorTop - pickerRect.height - gap,
+      top =
+        below + pickerRect.height <= window.innerHeight - padding || above < padding
+          ? Math.min(below, maxTop)
+          : above;
+
+    if (pending.left !== left || pending.top !== top)
+      setPending((current) =>
+        current ? { ...current, left, top } : current,
+      );
+  }, [pending]);
   if (!d)
     return (
       <div className="card mut">
@@ -1508,27 +1657,6 @@ function Annotate() {
       : assignedRows(d, me.u)
   ).sort((x, y) => x.start - y.start);
   const myRowCount = myRanges.reduce((n, r) => n + (r.end - r.start + 1), 0);
-  useEffect(() => {
-    if (!pending || pending.manuallyPositioned || !picker.current) return;
-
-    const padding = 8,
-      gap = 8,
-      pickerRect = picker.current.getBoundingClientRect(),
-      maxLeft = Math.max(padding, window.innerWidth - pickerRect.width - padding),
-      maxTop = Math.max(padding, window.innerHeight - pickerRect.height - padding),
-      left = Math.max(padding, Math.min(pending.anchorLeft, maxLeft)),
-      below = pending.anchorBottom + gap,
-      above = pending.anchorTop - pickerRect.height - gap,
-      top =
-        below + pickerRect.height <= window.innerHeight - padding || above < padding
-          ? Math.min(below, maxTop)
-          : above;
-
-    if (pending.left !== left || pending.top !== top)
-      setPending((current) =>
-        current ? { ...current, left, top } : current,
-      );
-  }, [pending]);
   const dragPicker = (event) => {
     if (event.button !== 0 || !picker.current) return;
     event.preventDefault();
@@ -1906,12 +2034,23 @@ function Annotate() {
                     <button
                       className="danger"
                       disabled={String(n.id).startsWith("tmp-")}
-                      onClick={() =>
-                        removeAnnotation(
-                          n,
-                          `Entity removed: "${d.text.slice(n.s, n.e)}"`,
+                      onClick={async () => {
+                        const text = d.text.slice(n.s, n.e);
+                        if (
+                          !(await ask({
+                            title: "Remove entity?",
+                            message:
+                              "This entity will be removed from the document.",
+                            detail: `${text} · ${n.l}`,
+                            confirmText: "Remove",
+                            requiredText: text,
+                            requiredPrompt:
+                              "Type the exact annotated text to confirm removal:",
+                          }))
                         )
-                      }
+                          return;
+                        removeAnnotation(n, `Entity removed: "${text}"`);
+                      }}
                     >
                       {L("Remove")}
                     </button>
@@ -1925,63 +2064,173 @@ function Annotate() {
   );
 }
 
+function renderAnnotatedRow(doc, lineStart, rowAnnotations, colorForLabel) {
+  let lineEnd = lineStart;
+  while (
+    lineEnd < doc.text.length &&
+    doc.text[lineEnd] !== "\r" &&
+    doc.text[lineEnd] !== "\n"
+  )
+    lineEnd++;
+  const parts = [];
+  let offset = lineStart;
+  for (const annotation of rowAnnotations) {
+    const start = Math.max(annotation.s, lineStart);
+    const end = Math.min(annotation.e, lineEnd);
+    if (start < offset) continue;
+    if (start > offset)
+      parts.push(
+        <span key={`text-${offset}`}>
+          {doc.text.slice(offset, start)}
+        </span>,
+      );
+    const color = colorForLabel(annotation.l);
+    parts.push(
+      <mark
+        key={annotation.id}
+        style={{
+          background: color + "33",
+          borderBottom: "3px solid " + color,
+        }}
+      >
+        {doc.text.slice(start, end)}
+        <sup>{annotation.l}</sup>
+      </mark>,
+    );
+    offset = end;
+  }
+  if (offset < lineEnd)
+    parts.push(<span key="row-end">{doc.text.slice(offset, lineEnd)}</span>);
+  return parts;
+}
+
+function collectDataRows(documents, docDetails, annotator, isAdmin, username) {
+  const groups = new Map(),
+    labelCounts = {};
+  let entityCount = 0;
+  for (const metadata of documents) {
+    const doc = docDetails[metadata.id] || metadata;
+    if (typeof doc.text !== "string" || !Array.isArray(doc.anns)) continue;
+    const annotations = doc.anns
+      .filter((annotation) => {
+        const owner = annotation.by || doc.as || "";
+        return isAdmin
+          ? annotator === "all" || owner === annotator
+          : owner === username;
+      })
+      .sort((a, b) => a.s - b.s);
+    let position = 0,
+      rowNumber = 1,
+      lineStart = 0;
+    for (const annotation of annotations) {
+      while (position < annotation.s) {
+        if (doc.text[position] === "\r") {
+          if (doc.text[position + 1] === "\n") position++;
+          rowNumber++;
+          lineStart = position + 1;
+        } else if (doc.text[position] === "\n") {
+          rowNumber++;
+          lineStart = position + 1;
+        }
+        position++;
+      }
+      const key = `${doc.id}:${rowNumber}`;
+      let group = groups.get(key);
+      if (!group) {
+        group = { doc, rowNumber, lineStart, annotations: [] };
+        groups.set(key, group);
+      }
+      group.annotations.push(annotation);
+      entityCount++;
+      labelCounts[annotation.l] = (labelCounts[annotation.l] || 0) + 1;
+    }
+  }
+  return { rows: [...groups.values()], entityCount, labelCounts };
+}
+
 function Data() {
-  const { L, me, db, docDetails } = useContext(C),
+  const { L, me, db, docDetails, loadAllDocDetails } = useContext(C),
     A = me.role === "admin",
     [annotator, setAnnotator] = useState("all"),
     [rowIndex, setRowIndex] = useState(0),
-    rows = [],
-    cnt = {};
-  db.docs.forEach((metadata) => {
-    const d = docDetails[metadata.id];
-    if (!d) return;
-    d.anns.forEach((n) => {
-      const owner = n.by || d.as || "";
-      if (
-        (A && annotator !== "all" && owner !== annotator) ||
-        (!A && owner !== me.u)
-      )
-        return;
-      rows.push([d, n]);
-      cnt[n.l] = (cnt[n.l] || 0) + 1;
-    });
-  });
+    [detailsLoading, setDetailsLoading] = useState(true),
+    [detailsError, setDetailsError] = useState(""),
+    [reloadKey, setReloadKey] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setDetailsLoading(true);
+    setDetailsError("");
+    loadAllDocDetails(
+      db.docs.filter(
+        (doc) => typeof doc.annCount !== "number" || doc.annCount > 0,
+      ),
+    )
+      .catch((error) => {
+        if (active)
+          setDetailsError(error.message || "Could not load annotation data.");
+      })
+      .finally(() => {
+        if (active) setDetailsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [db.docs, loadAllDocDetails, reloadKey]);
+  const { rows, entityCount, labelCounts } = useMemo(
+    () => collectDataRows(db.docs, docDetails, annotator, A, me.u),
+    [db.docs, docDetails, annotator, A, me.u],
+  );
   const currentIndex = Math.min(rowIndex, Math.max(0, rows.length - 1));
   const col = (n) => db.labels.find((l) => l.n === n)?.c || "#888";
   return (
     <>
       <div className="card">
         {A && (
-          <div className="row" style={{ marginBottom: 8 }}>
-            <label>{L("Annotator")}</label>
-            <select
-              id="data-annotator"
-              name="data-annotator"
-              value={annotator}
-              onChange={(e) => {
-                setAnnotator(e.target.value);
-                setRowIndex(0);
-              }}
-            >
-              <option value="all">{L("All annotators")}</option>
-              {db.users
-                .filter((u) => u.role === "annotator")
-                .map((u) => (
-                  <option key={u.u} value={u.u}>
-                    {u.u}
-                  </option>
-                ))}
-            </select>
+          <div className="tabs" role="tablist" aria-label={L("Annotator")}>
+            {[
+              { username: "all", label: L("All annotators") },
+              ...db.users
+                .filter((user) => user.role === "annotator")
+                .map((user) => ({ username: user.u, label: user.u })),
+            ].map(({ username, label }) => (
+              <button
+                key={username}
+                id={`data-annotator-${encodeURIComponent(username)}`}
+                type="button"
+                role="tab"
+                aria-selected={annotator === username}
+                className={annotator === username ? "on" : ""}
+                onClick={() => {
+                  setAnnotator(username);
+                  setRowIndex(0);
+                }}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         )}
-        <b>{rows.length}</b> {L("entities")}
-        <div className="row" style={{ marginTop: 6 }}>
-          {Object.keys(cnt).map((k) => (
-            <span key={k} className="chip" style={{ borderColor: col(k) }}>
-              {k}: {cnt[k]}
-            </span>
-          ))}
-        </div>
+        {detailsLoading ? (
+          <span role="status">{L("Loading annotation data...")}</span>
+        ) : detailsError ? (
+          <div className="assign-msg bad" role="alert">
+            {detailsError}{" "}
+            <button type="button" onClick={() => setReloadKey((key) => key + 1)}>
+              {L("Retry")}
+            </button>
+          </div>
+        ) : (
+          <>
+            <b>{entityCount}</b> {L("entities")}
+            <div className="row" style={{ marginTop: 6 }}>
+              {Object.keys(labelCounts).map((k) => (
+                <span key={k} className="chip" style={{ borderColor: col(k) }}>
+                  {k}: {labelCounts[k]}
+                </span>
+              ))}
+            </div>
+          </>
+        )}
       </div>
       <div className="card tw">
         <div className="row" style={{ justifyContent: "space-between" }}>
@@ -2004,6 +2253,7 @@ function Data() {
         <table>
           <thead>
             <tr>
+              <th>{L("Row")}</th>
               <th>{L("Text")}</th>
               <th>{L("Label")}</th>
               <th>{L("Document")}</th>
@@ -2012,20 +2262,49 @@ function Data() {
             </tr>
           </thead>
           <tbody>
-            {rows.slice(currentIndex, currentIndex + 1).map(([d, n]) => (
-              <tr key={n.id}>
-                <td>{d.text.slice(n.s, n.e)}</td>
-                <td>{n.l}</td>
-                <td>{d.title}</td>
-                {A && <td>{n.by || d.as || "-"}</td>}
-                <td>
-                  {n.s}–{n.e}
-                </td>
-              </tr>
-            ))}
-            {!rows.length && (
+            {rows.slice(currentIndex, currentIndex + 1).map((group) => {
+              const { doc: d, rowNumber, lineStart, annotations } = group;
+              return (
+                <tr key={`${d.id}:${rowNumber}`}>
+                  <td>{rowNumber}</td>
+                  <td style={{ whiteSpace: "pre-wrap" }}>
+                    {renderAnnotatedRow(d, lineStart, annotations, col)}
+                  </td>
+                  <td>
+                    {annotations.map((annotation) => (
+                      <div key={annotation.id}>
+                        <span
+                          className="chip"
+                          style={{ borderColor: col(annotation.l) }}
+                        >
+                          {annotation.l}
+                        </span>
+                      </div>
+                    ))}
+                  </td>
+                  <td>{d.title}</td>
+                  {A && (
+                    <td>
+                      {annotations.map((annotation) => (
+                        <div key={annotation.id}>
+                          {annotation.by || d.as || "-"}
+                        </div>
+                      ))}
+                    </td>
+                  )}
+                  <td>
+                    {annotations.map((annotation) => (
+                      <div key={annotation.id}>
+                        {annotation.s}–{annotation.e}
+                      </div>
+                    ))}
+                  </td>
+                </tr>
+              );
+            })}
+            {!detailsLoading && !detailsError && !rows.length && (
               <tr>
-                <td colSpan={5} className="mut">
+                <td colSpan={A ? 6 : 5} className="mut">
                   {L("No entities yet.")}
                 </td>
               </tr>
@@ -2038,7 +2317,7 @@ function Data() {
 }
 
 function Labels() {
-  const { L, db, run, notify } = useContext(C),
+  const { L, db, run, notify, ask } = useContext(C),
     [n, setN] = useState(""),
     [c, setC] = useState("#f59e0b");
   return (
@@ -2095,12 +2374,32 @@ function Labels() {
               className="danger"
               style={{ padding: "0 6px" }}
               title={L("Delete")}
-              onClick={() =>
-                run(() => api("DELETE", "/labels/" + encodeURIComponent(l.n)), {
-                  ok: `Deleted label: ${l.n}`,
-                  kind: "danger",
-                })
-              }
+              onClick={async () => {
+                if (
+                  !(await ask({
+                    title: "Delete label?",
+                    message:
+                      "Delete this label? Entities that use it may be affected.",
+                    detail: l.n,
+                    confirmText: "Delete",
+                    requiredText: l.n,
+                    requiredPrompt:
+                      "Type the exact label name to confirm deletion:",
+                  }))
+                )
+                  return;
+                await run(
+                  () =>
+                    api(
+                      "DELETE",
+                      "/labels/" + encodeURIComponent(l.n),
+                    ),
+                  {
+                    ok: `Deleted label: ${l.n}`,
+                    kind: "danger",
+                  },
+                );
+              }}
             >
               ✕
             </button>
@@ -2112,7 +2411,7 @@ function Labels() {
 }
 
 function Users() {
-  const { L, rl, me, db, run, notify, setMsg } = useContext(C),
+  const { L, rl, me, db, run, notify, setMsg, ask } = useContext(C),
     [u, setU] = useState(""),
     [p, setP] = useState(""),
     [r, setR] = useState("annotator"),
@@ -2221,13 +2520,28 @@ function Users() {
                   {x.u !== me.u && (
                     <button
                       className="danger"
-                      onClick={() =>
-                        run(
-                          () =>
-                            api("DELETE", "/users/" + encodeURIComponent(x.u)),
-                          { ok: `Deleted user: ${x.u}`, kind: "danger" },
+                      onClick={async () => {
+                        if (
+                          !(await ask({
+                            title: "Delete user?",
+                            message: "This user account will be deleted.",
+                            detail: x.u,
+                            confirmText: "Delete",
+                            requiredText: x.u,
+                            requiredPrompt:
+                              "Type the exact username to confirm deletion:",
+                          }))
                         )
-                      }
+                          return;
+                        await run(
+                          () =>
+                            api(
+                              "DELETE",
+                              "/users/" + encodeURIComponent(x.u),
+                            ),
+                          { ok: `Deleted user: ${x.u}`, kind: "danger" },
+                        );
+                      }}
                     >
                       {L("Delete")}
                     </button>

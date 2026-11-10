@@ -2,6 +2,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -857,15 +858,22 @@ function assignedRows(d, username) {
 function rowCompletion(docs, username) {
   return docs.reduce(
     (total, doc) => {
-      const progress = Number(doc.progressByUser?.[username]) || 0;
+      const highlightedRows = new Set(
+        doc.highlightedRowsByUser?.[username] ||
+          (doc.text
+            ? (doc.anns || [])
+                .filter((annotation) => annotation.by === username)
+                .map((annotation) => rowForOffset(doc.text, annotation.s))
+            : []),
+      );
+      const completedRows = new Set();
       for (const range of assignedRows(doc, username)) {
         const end = range.end || doc.rowCount || range.start;
         total.assigned += Math.max(0, end - range.start + 1);
-        total.completed += Math.max(
-          0,
-          Math.min(end, progress) - range.start + 1,
-        );
+        for (const row of highlightedRows)
+          if (row >= range.start && row <= end) completedRows.add(row);
       }
+      total.completed += completedRows.size;
       return total;
     },
     { completed: 0, assigned: 0 },
@@ -1159,6 +1167,7 @@ function Annotate() {
       setSnapOn,
     } = useContext(C),
     box = useRef(null),
+    picker = useRef(null),
     [lineIndex, setLineIndex] = useState(0),
     [lineInput, setLineInput] = useState("1"),
     [progressLoadedFor, setProgressLoadedFor] = useState(null),
@@ -1242,18 +1251,47 @@ function Annotate() {
     setDb((current) => ({
       ...current,
       docs: current.docs.map((doc) =>
-        doc.id === d.id && typeof doc.annCount === "number"
-          ? {
-              ...doc,
-              annCount: Math.max(0, doc.annCount + amount),
-              anns:
+        doc.id !== d.id
+          ? doc
+          : (() => {
+              const anns =
                 amount > 0
                   ? [...(doc.anns || []), annotation]
                   : (doc.anns || []).filter(
                       (item) => item.id !== annotation.id,
-                    ),
-            }
-          : doc,
+                    );
+              const row = rowForOffset(d.text, annotation.s);
+              const rows = new Set(
+                doc.highlightedRowsByUser?.[annotation.by] ||
+                  (d.text
+                    ? (d.anns || [])
+                        .filter((item) => item.by === annotation.by)
+                        .map((item) => rowForOffset(d.text, item.s))
+                    : []),
+              );
+              if (amount > 0) rows.add(row);
+              else if (
+                !anns.some(
+                  (item) =>
+                    item.by === annotation.by &&
+                    rowForOffset(d.text, item.s) === row,
+                )
+              )
+                rows.delete(row);
+              const highlightedRowsByUser = {
+                ...doc.highlightedRowsByUser,
+                [annotation.by]: [...rows],
+              };
+              return {
+                ...doc,
+                annCount:
+                  typeof doc.annCount === "number"
+                    ? Math.max(0, doc.annCount + amount)
+                    : doc.annCount,
+                anns,
+                highlightedRowsByUser,
+              };
+            })(),
       ),
     }));
   const removeAnnotation = async (annotation, message) => {
@@ -1471,6 +1509,61 @@ function Annotate() {
       : assignedRows(d, me.u)
   ).sort((x, y) => x.start - y.start);
   const myRowCount = myRanges.reduce((n, r) => n + (r.end - r.start + 1), 0);
+  useLayoutEffect(() => {
+    if (!pending || pending.manuallyPositioned || !picker.current) return;
+
+    const padding = 8,
+      gap = 8,
+      pickerRect = picker.current.getBoundingClientRect(),
+      maxLeft = Math.max(padding, window.innerWidth - pickerRect.width - padding),
+      maxTop = Math.max(padding, window.innerHeight - pickerRect.height - padding),
+      left = Math.max(padding, Math.min(pending.anchorLeft, maxLeft)),
+      below = pending.anchorBottom + gap,
+      above = pending.anchorTop - pickerRect.height - gap,
+      top =
+        below + pickerRect.height <= window.innerHeight - padding || above < padding
+          ? Math.min(below, maxTop)
+          : above;
+
+    if (pending.left !== left || pending.top !== top)
+      setPending((current) =>
+        current ? { ...current, left, top } : current,
+      );
+  }, [pending]);
+  const dragPicker = (event) => {
+    if (event.button !== 0 || !picker.current) return;
+    event.preventDefault();
+
+    const pickerRect = picker.current.getBoundingClientRect(),
+      offsetX = event.clientX - pickerRect.left,
+      offsetY = event.clientY - pickerRect.top,
+      move = (moveEvent) => {
+        const padding = 8,
+          rect = picker.current?.getBoundingClientRect();
+        if (!rect) return;
+        const maxLeft = Math.max(padding, window.innerWidth - rect.width - padding),
+          maxTop = Math.max(padding, window.innerHeight - rect.height - padding),
+          left = Math.max(
+            padding,
+            Math.min(moveEvent.clientX - offsetX, maxLeft),
+          ),
+          top = Math.max(
+            padding,
+            Math.min(moveEvent.clientY - offsetY, maxTop),
+          );
+        setPending((current) =>
+          current ? { ...current, left, top, manuallyPositioned: true } : current,
+        );
+      },
+      stop = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+        window.removeEventListener("pointercancel", stop);
+      };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  };
   const sel = () =>
     setTimeout(() => {
       const s = getSelection();
@@ -1505,13 +1598,16 @@ function Annotate() {
         notify("That text overlaps an existing entity. Remove it first.", "danger");
         return;
       }
-      const rect = r.getBoundingClientRect(),
-        left = Math.max(8, Math.min(rect.left, window.innerWidth - 260)),
-        top =
-          rect.bottom + 58 < window.innerHeight
-            ? rect.bottom + 8
-            : Math.max(8, rect.top - 58);
-      setPending({ start: st, end: en, left, top });
+      const rect = r.getBoundingClientRect();
+      setPending({
+        start: st,
+        end: en,
+        anchorLeft: rect.left,
+        anchorTop: rect.top,
+        anchorBottom: rect.bottom,
+        left: rect.left,
+        top: rect.bottom + 8,
+      });
     }, 50);
   const currentLineIndex = Math.min(lineIndex, lines.length - 1),
     currentLine = lines[currentLineIndex],
@@ -1719,11 +1815,14 @@ function Annotate() {
         {pending && (
           <div
             className="label-picker"
+            ref={picker}
             style={{ left: pending.left, top: pending.top }}
             role="group"
             aria-label={L("Choose a label for selected text:")}
           >
-            <b>{d.text.slice(pending.start, pending.end)}</b>
+            <b className="label-picker-handle" onPointerDown={dragPicker}>
+              {d.text.slice(pending.start, pending.end)}
+            </b>
             <div className="label-picker-options">
               {db.labels.map((l, i) => (
                 <button

@@ -566,6 +566,34 @@ app.get(
         }
       }
     }
+    const highlightedRowsByDoc = new Map();
+    for (const [docId, anns] of annsByDoc) {
+      const doc = docsById.get(docId);
+      if (!doc) continue;
+      const rowsByUser = new Map();
+      let position = 0;
+      let row = 1;
+      for (const annotation of anns) {
+        while (position < annotation.s) {
+          if (doc.body[position] === "\r") {
+            row++;
+            if (doc.body[position + 1] === "\n") position++;
+          } else if (doc.body[position] === "\n") {
+            row++;
+          }
+          position++;
+        }
+        if (!rowsByUser.has(annotation.by))
+          rowsByUser.set(annotation.by, new Set());
+        rowsByUser.get(annotation.by).add(row);
+      }
+      highlightedRowsByDoc.set(
+        docId,
+        Object.fromEntries(
+          [...rowsByUser].map(([user, rows]) => [user, [...rows]]),
+        ),
+      );
+    }
     s.json(
       docs.rows.map((d) => ({
         id: String(d.id),
@@ -587,6 +615,8 @@ app.get(
         review: d.review,
         note: d.note,
         anns: annsByDoc.get(String(d.id)) || [],
+        highlightedRowsByUser:
+          highlightedRowsByDoc.get(String(d.id)) || {},
         annCount: (annsByDoc.get(String(d.id)) || []).length,
         rowCount: d.body.split(/\r\n|\r|\n/).length,
       })),

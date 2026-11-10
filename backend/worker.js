@@ -620,7 +620,7 @@ async function handleApi(request, env, connection, body, user, setStage = () => 
   if (method === "GET" && parts.length === 3 && parts[2] === "docs") {
     const docs = await execute(
       connection,
-      `select id,title,assignee,done,review,note,row_count as rowCount,
+      `select id,title,body_key,assignee,done,review,note,row_count as rowCount,
               (select count(*) from anns x where x.doc_id=docs.id) as annCount
        from docs
        ${isAdmin ? "" : "where exists(select 1 from doc_assignments da where da.doc_id=docs.id and da.username=?) or assignee=? or exists(select 1 from row_assignments ra where ra.doc_id=docs.id and ra.username=?)"} order by id`,
@@ -664,6 +664,59 @@ async function handleApi(request, env, connection, body, user, setStage = () => 
         end: row.end,
       });
     }
+    const highlightedAnnotations = await execute(
+      connection,
+      `select doc_id,s,author from anns
+       ${isAdmin ? "" : "where author=?"} order by doc_id,s`,
+      isAdmin ? [] : [username],
+    );
+    const annotationsByDoc = new Map();
+    for (const annotation of highlightedAnnotations.rows) {
+      const key = String(annotation.doc_id);
+      if (!annotationsByDoc.has(key)) annotationsByDoc.set(key, []);
+      annotationsByDoc.get(key).push(annotation);
+    }
+    const highlightedRowsByDoc = new Map();
+    const annotatedDocs = docs.rows.filter((doc) =>
+      annotationsByDoc.has(String(doc.id)),
+    );
+    let nextAnnotatedDoc = 0;
+    const loadHighlightedRows = async () => {
+      while (nextAnnotatedDoc < annotatedDocs.length) {
+        const doc = annotatedDocs[nextAnnotatedDoc++];
+        const annotations = annotationsByDoc.get(String(doc.id));
+        const text = await readDocument(env.DOCS, doc.body_key);
+        const rowsByUser = new Map();
+        let position = 0;
+        let row = 1;
+        for (const annotation of annotations) {
+          while (position < annotation.s) {
+            if (text[position] === "\r") {
+              row++;
+              if (text[position + 1] === "\n") position++;
+            } else if (text[position] === "\n") {
+              row++;
+            }
+            position++;
+          }
+          if (!rowsByUser.has(annotation.author))
+            rowsByUser.set(annotation.author, new Set());
+          rowsByUser.get(annotation.author).add(row);
+        }
+        highlightedRowsByDoc.set(
+          String(doc.id),
+          Object.fromEntries(
+            [...rowsByUser].map(([author, rows]) => [author, [...rows]]),
+          ),
+        );
+      }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(4, annotatedDocs.length) },
+        () => loadHighlightedRows(),
+      ),
+    );
     const result = docs.rows.map((doc) => {
       const docId = String(doc.id);
       const rowLimited = !isAdmin && rowAssignmentsByDoc.has(docId);
@@ -680,6 +733,7 @@ async function handleApi(request, env, connection, body, user, setStage = () => 
         as: assignees.join(", "),
         rowAssignments: rowAssignmentsByDoc.get(docId) || [],
         progressByUser: progressByDoc.get(docId) || {},
+        highlightedRowsByUser: highlightedRowsByDoc.get(docId) || {},
         rowCount: Number(doc.rowCount),
         annCount: rowLimited ? null : Number(doc.annCount),
         done: !!doc.done,

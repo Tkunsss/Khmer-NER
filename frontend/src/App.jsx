@@ -1771,7 +1771,11 @@ function Annotate() {
   const startTouchSelection = (event) => {
       touchSelection.current =
         event.touches.length === 1
-          ? { startedAt: Date.now(), movedBeforeLongPress: false }
+        ? {
+            startedAt: Date.now(),
+            movedBeforeLongPress: false,
+            contextMenuTriggered: false,
+          }
           : null;
     },
     trackTouchSelection = () => {
@@ -1779,11 +1783,18 @@ function Annotate() {
       if (touch && Date.now() - touch.startedAt < 500)
         touch.movedBeforeLongPress = true;
     },
+  handleTouchContextMenu = (event) => {
+    if (!window.matchMedia("(pointer: coarse)").matches) return;
+    event.preventDefault();
+    if (touchSelection.current)
+      touchSelection.current.contextMenuTriggered = true;
+    sel();
+  },
     endTouchSelection = () => {
       const touch = touchSelection.current;
       touchSelection.current = null;
       if (!touch) return;
-      if (touch.movedBeforeLongPress) {
+    if (touch.movedBeforeLongPress && !touch.contextMenuTriggered) {
         const selection = getSelection(),
           range = selection?.rangeCount ? selection.getRangeAt(0) : null;
         if (
@@ -2000,6 +2011,7 @@ function Annotate() {
           id="txt"
           ref={box}
           onMouseUp={sel}
+          onContextMenu={handleTouchContextMenu}
           onTouchStart={startTouchSelection}
           onTouchMove={trackTouchSelection}
           onTouchEnd={endTouchSelection}

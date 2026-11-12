@@ -3,6 +3,7 @@ import {
   useContext,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1293,7 +1294,9 @@ function Annotate() {
       setSnapOn,
     } = useContext(C),
     box = useRef(null),
+    card = useRef(null),
     picker = useRef(null),
+    touchSelection = useRef(null),
     [lineIndex, setLineIndex] = useState(0),
     [lineInput, setLineInput] = useState("1"),
     [progressLoadedFor, setProgressLoadedFor] = useState(null),
@@ -1547,6 +1550,50 @@ function Annotate() {
     document.addEventListener("keydown", k);
     return () => document.removeEventListener("keydown", k);
   });
+  useLayoutEffect(() => {
+    if (!pending || !picker.current || !card.current) return;
+
+    const positionPicker = () => {
+      const padding = 8,
+        gap = 8,
+        cardRect = card.current?.getBoundingClientRect();
+      if (!cardRect || !picker.current) return;
+      picker.current.style.maxWidth = `${Math.max(0, cardRect.width - padding * 2)}px`;
+      const pickerRect = picker.current.getBoundingClientRect(),
+        minLeft = cardRect.left + padding,
+        maxLeft = Math.max(
+          minLeft,
+          cardRect.right - pickerRect.width - padding,
+        ),
+        maxTop = Math.max(
+          padding,
+          window.innerHeight - pickerRect.height - padding,
+        ),
+        desiredLeft = pending.manuallyPositioned
+          ? pending.left
+          : pending.anchorLeft,
+        left = Math.max(minLeft, Math.min(desiredLeft, maxLeft)),
+        below = pending.anchorBottom + gap,
+        above = pending.anchorTop - pickerRect.height - gap,
+        desiredTop = pending.manuallyPositioned
+          ? pending.top
+          : below + pickerRect.height <= window.innerHeight - padding
+            ? below
+            : above >= padding
+              ? above
+              : Math.min(below, maxTop),
+        top = Math.max(padding, Math.min(desiredTop, maxTop));
+
+      if (pending.left !== left || pending.top !== top)
+        setPending((current) =>
+          current ? { ...current, left, top } : current,
+        );
+    };
+
+    positionPicker();
+    window.addEventListener("resize", positionPicker);
+    return () => window.removeEventListener("resize", positionPicker);
+  }, [pending]);
   if (!d)
     return (
       <div className="card mut">
@@ -1644,12 +1691,17 @@ function Annotate() {
       offsetY = event.clientY - pickerRect.top,
       move = (moveEvent) => {
         const padding = 8,
-          rect = picker.current?.getBoundingClientRect();
-        if (!rect) return;
-        const maxLeft = Math.max(padding, window.innerWidth - rect.width - padding),
+          rect = picker.current?.getBoundingClientRect(),
+          cardRect = card.current?.getBoundingClientRect();
+        if (!rect || !cardRect) return;
+        const minLeft = cardRect.left + padding,
+          maxLeft = Math.max(
+            minLeft,
+            cardRect.right - rect.width - padding,
+          ),
           maxTop = Math.max(padding, window.innerHeight - rect.height - padding),
           left = Math.max(
-            padding,
+            minLeft,
             Math.min(moveEvent.clientX - offsetX, maxLeft),
           ),
           top = Math.max(
@@ -1657,7 +1709,9 @@ function Annotate() {
             Math.min(moveEvent.clientY - offsetY, maxTop),
           );
         setPending((current) =>
-            current ? { ...current, left, top } : current,
+          current
+            ? { ...current, left, top, manuallyPositioned: true }
+            : current,
         );
       },
       stop = () => {
@@ -1707,10 +1761,41 @@ function Annotate() {
       setPending({
         start: st,
         end: en,
+        anchorLeft: rect.left,
+        anchorTop: rect.top,
+        anchorBottom: rect.bottom,
         left: rect.left,
         top: rect.bottom + 8,
       });
     }, 50);
+  const startTouchSelection = (event) => {
+      touchSelection.current =
+        event.touches.length === 1
+          ? { startedAt: Date.now(), movedBeforeLongPress: false }
+          : null;
+    },
+    trackTouchSelection = () => {
+      const touch = touchSelection.current;
+      if (touch && Date.now() - touch.startedAt < 500)
+        touch.movedBeforeLongPress = true;
+    },
+    endTouchSelection = () => {
+      const touch = touchSelection.current;
+      touchSelection.current = null;
+      if (!touch) return;
+      if (touch.movedBeforeLongPress) {
+        const selection = getSelection(),
+          range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+        if (
+          range &&
+          box.current?.contains(range.startContainer) &&
+          box.current?.contains(range.endContainer)
+        )
+          selection.removeAllRanges();
+        return;
+      }
+      sel();
+    };
   const currentLineIndex = Math.min(lineIndex, lines.length - 1),
     currentLine = lines[currentLineIndex],
     rowAnnotations = currentLine
@@ -1751,7 +1836,7 @@ function Annotate() {
     );
   return (
     <>
-      <div className="card">
+      <div className="card" ref={card}>
         <div className="row">
           <b>{d.title}</b>
           <button
@@ -1915,7 +2000,9 @@ function Annotate() {
           id="txt"
           ref={box}
           onMouseUp={sel}
-          onTouchEnd={sel}
+          onTouchStart={startTouchSelection}
+          onTouchMove={trackTouchSelection}
+          onTouchEnd={endTouchSelection}
           className={rowAssigned(currentLineIndex + 1) ? "" : "unassigned-row"}
         >
           {rowAssigned(currentLineIndex + 1)

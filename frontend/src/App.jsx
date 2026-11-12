@@ -1547,27 +1547,6 @@ function Annotate() {
     document.addEventListener("keydown", k);
     return () => document.removeEventListener("keydown", k);
   });
-  useEffect(() => {
-    if (!pending || pending.manuallyPositioned || !picker.current) return;
-
-    const padding = 8,
-      gap = 8,
-      pickerRect = picker.current.getBoundingClientRect(),
-      maxLeft = Math.max(padding, window.innerWidth - pickerRect.width - padding),
-      maxTop = Math.max(padding, window.innerHeight - pickerRect.height - padding),
-      left = Math.max(padding, Math.min(pending.anchorLeft, maxLeft)),
-      below = pending.anchorBottom + gap,
-      above = pending.anchorTop - pickerRect.height - gap,
-      top =
-        below + pickerRect.height <= window.innerHeight - padding || above < padding
-          ? Math.min(below, maxTop)
-          : above;
-
-    if (pending.left !== left || pending.top !== top)
-      setPending((current) =>
-        current ? { ...current, left, top } : current,
-      );
-  }, [pending]);
   if (!d)
     return (
       <div className="card mut">
@@ -1678,7 +1657,7 @@ function Annotate() {
             Math.min(moveEvent.clientY - offsetY, maxTop),
           );
         setPending((current) =>
-          current ? { ...current, left, top, manuallyPositioned: true } : current,
+            current ? { ...current, left, top } : current,
         );
       },
       stop = () => {
@@ -1728,9 +1707,6 @@ function Annotate() {
       setPending({
         start: st,
         end: en,
-        anchorLeft: rect.left,
-        anchorTop: rect.top,
-        anchorBottom: rect.bottom,
         left: rect.left,
         top: rect.bottom + 8,
       });
@@ -1873,12 +1849,16 @@ function Annotate() {
         </p>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <button
+            className="nav-btn nav-prev"
             disabled={
               progressLoadedFor !== `${me.u}:${cur}` ||
               stepRow(currentLineIndex + 1, -1) === null
             }
             onClick={() => goRow(stepRow(currentLineIndex + 1, -1))}
           >
+            <span className="nav-ico" aria-hidden="true">
+              ←
+            </span>
             {L("Previous")}
           </button>
           <form
@@ -1918,6 +1898,7 @@ function Annotate() {
             </button>
           </form>
           <button
+            className="nav-btn nav-next"
             disabled={
               progressLoadedFor !== `${me.u}:${cur}` ||
               stepRow(currentLineIndex + 1, 1) === null
@@ -1925,6 +1906,9 @@ function Annotate() {
             onClick={() => goRow(stepRow(currentLineIndex + 1, 1))}
           >
             {L("Next")}
+            <span className="nav-ico" aria-hidden="true">
+              →
+            </span>
           </button>
         </div>
         <div

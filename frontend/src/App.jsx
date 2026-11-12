@@ -1285,7 +1285,6 @@ function Annotate() {
       docDetails,
       updateDocDetail,
       notify,
-      ask,
       cur,
       act,
       setAct,
@@ -2034,21 +2033,8 @@ function Annotate() {
                     <button
                       className="danger"
                       disabled={String(n.id).startsWith("tmp-")}
-                      onClick={async () => {
+                      onClick={() => {
                         const text = d.text.slice(n.s, n.e);
-                        if (
-                          !(await ask({
-                            title: "Remove entity?",
-                            message:
-                              "This entity will be removed from the document.",
-                            detail: `${text} · ${n.l}`,
-                            confirmText: "Remove",
-                            requiredText: text,
-                            requiredPrompt:
-                              "Type the exact annotated text to confirm removal:",
-                          }))
-                        )
-                          return;
                         removeAnnotation(n, `Entity removed: "${text}"`);
                       }}
                     >

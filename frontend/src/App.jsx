@@ -1389,7 +1389,18 @@ function Annotate() {
                   : (doc.anns || []).filter(
                       (item) => item.id !== annotation.id,
                     );
-              const row = rowForOffset(d.text, annotation.s);
+              let low = 0;
+              let high = lines.length;
+              while (low < high) {
+                const middle = Math.floor((low + high) / 2);
+                if (lines[middle].start <= annotation.s) low = middle + 1;
+                else high = middle;
+              }
+              const rowIndex = Math.max(0, low - 1);
+              const row = rowIndex + 1;
+              const lineStart = lines[rowIndex]?.start || 0;
+              const nextLineStart =
+                lines[rowIndex + 1]?.start ?? d.text.length + 1;
               const rows = new Set(
                 doc.highlightedRowsByUser?.[annotation.by] ||
                   (d.text
@@ -1400,10 +1411,12 @@ function Annotate() {
               );
               if (amount > 0) rows.add(row);
               else if (
-                !anns.some(
+                !d.anns.some(
                   (item) =>
+                    item.id !== annotation.id &&
                     item.by === annotation.by &&
-                    rowForOffset(d.text, item.s) === row,
+                    item.s >= lineStart &&
+                    item.s < nextLineStart,
                 )
               )
                 rows.delete(row);
